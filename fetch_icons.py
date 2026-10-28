@@ -24,6 +24,7 @@ SOURCES = [
     ("allhentai",     "20.allhen.online"),
     ("desu",          "desu.me"),
     ("mangalib",      "mangalib.me"),
+    ("slashlib",      "slashlib.me"),
     ("yaoilib",       "yaoilib.me"),
     ("hentailib",     "hentailib.me"),
     ("remanga",       "remanga.org"),

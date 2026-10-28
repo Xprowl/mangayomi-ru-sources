@@ -1,6 +1,6 @@
 # Mangayomi RU Sources
 
-Репозиторий расширений для [Mangayomi](https://github.com/kodjodevf/mangayomi) — **30 русских источников** манги, аниме и новелл.
+Репозиторий расширений для [Mangayomi](https://github.com/kodjodevf/mangayomi) — **31 русский источник** манги, аниме и новелл.
 
 Покрывает то, чего не хватает в основных репозиториях kodjodevf/m2k3a/Schnitzel5: ReadManga-семейство, AnimeGO, AniLib/MangaLib (новые .org-домены), Animesss, YummyAnime, Anixart, Ранобэ.рф, Senkuro/Senkognito/Shiruho и др.
 
@@ -14,8 +14,8 @@
 
 | Что подключить | URL |
 |---|---|
-| **Всё (30 источников)** | `https://redcatpet.github.io/mangayomi-ru-sources/index.json` |
-| Только манга (12) | `https://redcatpet.github.io/mangayomi-ru-sources/manga_index.json` |
+| **Всё (31 источник)** | `https://redcatpet.github.io/mangayomi-ru-sources/index.json` |
+| Только манга (13) | `https://redcatpet.github.io/mangayomi-ru-sources/manga_index.json` |
 | Только аниме (12) | `https://redcatpet.github.io/mangayomi-ru-sources/anime_index.json` |
 | Только новеллы (6) | `https://redcatpet.github.io/mangayomi-ru-sources/novel_index.json` |
 
@@ -43,6 +43,8 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 **Новеллы (5):** Jaomix · RanobeHub · RanobeLib · Ранобэ.рф · Tl.Rulate
 
+> **v0.9.2**: добавлен **SlashLib** (манга, яой/юри). Семейство Lib, `site_id=2`, API `api.cdnlibs.org`. В каталоге, деталях, главах и страницах проверено на живых данных: 60 тайтлов на страницу, 123 главы, 45 страниц главы (WebP/PNG с `img2/img3.hentaicdn.org`). Жанров — 56 (включая Яой/Юри): `/api/genres` у site 2 отдаёт 403 без логина, поэтому список берётся из `/api/constants?fields[]=genres` и отфильтрован по `site_ids`. Заодно в Lib-базе появился фолбэк `libApiBase()`/`libWebBase()` — если Host-приложение отдаст пустой `apiUrl`/`baseUrl`, запросы всё равно уйдут на абсолютный URL (иначе rhttp падает с `relative URL without a base`).
+>
 > **v0.9.1**: пофикшен «Веб-просмотр» в **MangaLib / HentaiLib / AniLib / RanobeLib** — раньше кнопка вела на 404 (URL `mangalib.org206--one-piece` без слэша). Теперь `link` содержит правильный путь `/ru/manga/206--one-piece` и Web View корректно открывает страницу тайтла. Если у тебя страницы 2+ всё ещё не грузятся в плеере (404 у первой работает, дальше пусто) — в Settings источника попробуй переключить «Сервер изображений» на **Crop (превью)** — это thumbnail 310×450 без проверки Referer (Mangayomi на некоторых платформах не пробрасывает Referer на отдельные картинки → mixlib возвращает 403).
 >
 > **v0.9.0**: пофикшена загрузка страниц глав в **MangaLib / HentaiLib / AniLib / RanobeLib**. Раньше использовался default-сервер `img2.imglib.info`, который с 2026-04 блокируется DDoS-Guard (403 на любые запросы). Теперь расширение делает HEAD-проверку первой страницы и автоматически переключается на следующий рабочий CDN (обычно `img3.mixlib.me`). Default сменился на `compress`.
@@ -159,7 +161,7 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 - **Remanga** — 34 жанра + 5 статусов + 7 типов + возраст + 5 сортировок
 - **Grouple** (ReadManga/MintManga/SelfManga/AllHentai) — 40 жанров + 5 сортировок + 7 advanced-флагов
-- **Lib** (MangaLib/HentaiLib/RanobeLib/AniLib) — 50 жанров TriState + статусы + типы + 9 ключей сортировки
+- **Lib** (MangaLib/HentaiLib/RanobeLib/AniLib) — 50 жанров TriState + статусы + типы + 9 ключей сортировки; **SlashLib** — 56 жанров (включая Яой/Юри)
 - **AnimeGO** — path-routing genre/status/type
 - **Anixart** — 38 жанров TriState + 6 сортировок + статус + категория (TV/Movie/OVA/...)
 - **Senkuro / Senkognito** — ~50 жанров TriState + 4 сортировки + 5 типов (Манга/Манхва/Маньхуа/...) + 5 статусов
@@ -176,7 +178,7 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 ```
 lib/
   grouple_base.js       Helpers для ReadManga/MintManga/SelfManga/AllHentai
-  lib_family_base.js    Helpers для MangaLib/HentaiLib/AniLib/RanobeLib
+  lib_family_base.js    Helpers для MangaLib/SlashLib/HentaiLib/AniLib/RanobeLib
   kodik_extractor.js    Универсальный Kodik iframe → HLS extractor
                         (используют animego, animelib, animedia, anixart,
                          animesss, yummyanime)
