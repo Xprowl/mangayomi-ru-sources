@@ -1,6 +1,6 @@
 # Mangayomi RU Sources
 
-Репозиторий расширений для [Mangayomi](https://github.com/kodjodevf/mangayomi) — **31 русский источник** манги, аниме и новелл.
+Репозиторий расширений для [Mangayomi](https://github.com/kodjodevf/mangayomi) — **32 русских источника** манги, аниме и новелл.
 
 Покрывает то, чего не хватает в основных репозиториях kodjodevf/m2k3a/Schnitzel5: ReadManga-семейство, AnimeGO, AniLib/MangaLib (новые .org-домены), Animesss, YummyAnime, Anixart, Ранобэ.рф, Senkuro/Senkognito/Shiruho и др.
 
@@ -14,9 +14,9 @@
 
 | Что подключить | URL |
 |---|---|
-| **Всё (31 источник)** | `https://redcatpet.github.io/mangayomi-ru-sources/index.json` |
+| **Всё (32 источника)** | `https://redcatpet.github.io/mangayomi-ru-sources/index.json` |
 | Только манга (13) | `https://redcatpet.github.io/mangayomi-ru-sources/manga_index.json` |
-| Только аниме (12) | `https://redcatpet.github.io/mangayomi-ru-sources/anime_index.json` |
+| Только аниме (13) | `https://redcatpet.github.io/mangayomi-ru-sources/anime_index.json` |
 | Только новеллы (6) | `https://redcatpet.github.io/mangayomi-ru-sources/novel_index.json` |
 
 После импорта включи нужные источники.
@@ -43,6 +43,8 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 **Новеллы (5):** Jaomix · RanobeHub · RanobeLib · Ранобэ.рф · Tl.Rulate
 
+> **v0.9.3**: добавлен **AniStar** (31.astar.bz, аниме). DLE-движок на windows-1251 — текст читается через XHR с явным декодированием. Каталог /anime/page/N/, «Новинки» /new/, жанры /filter/janrs/<urlencoded>/. Серии и плееры берутся из /test/player2/videoas*.php: HLS (HQ/SD) с n-media.org, нужен Referer сайта. Встроенный поиск DLE по аниме пустой, поэтому поиск идёт по каталогу (по страницам).
+>
 > **v0.9.2**: добавлен **SlashLib** (манга, яой/юри). Семейство Lib, `site_id=2`, API `api.cdnlibs.org`. В каталоге, деталях, главах и страницах проверено на живых данных: 60 тайтлов на страницу, 123 главы, 45 страниц главы (WebP/PNG с `img2/img3.hentaicdn.org`). Жанров — 56 (включая Яой/Юри): `/api/genres` у site 2 отдаёт 403 без логина, поэтому список берётся из `/api/constants?fields[]=genres` и отфильтрован по `site_ids`. Заодно в Lib-базе появился фолбэк `libApiBase()`/`libWebBase()` — если Host-приложение отдаст пустой `apiUrl`/`baseUrl`, запросы всё равно уйдут на абсолютный URL (иначе rhttp падает с `relative URL without a base`).
 >
 > **v0.9.1**: пофикшен «Веб-просмотр» в **MangaLib / HentaiLib / AniLib / RanobeLib** — раньше кнопка вела на 404 (URL `mangalib.org206--one-piece` без слэша). Теперь `link` содержит правильный путь `/ru/manga/206--one-piece` и Web View корректно открывает страницу тайтла. Если у тебя страницы 2+ всё ещё не грузятся в плеере (404 у первой работает, дальше пусто) — в Settings источника попробуй переключить «Сервер изображений» на **Crop (превью)** — это thumbnail 310×450 без проверки Referer (Mangayomi на некоторых платформах не пробрасывает Referer на отдельные картинки → mixlib возвращает 403).
