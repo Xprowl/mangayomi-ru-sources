@@ -8,14 +8,28 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": true,
-    "version": "0.4.0",
+    "version": "0.5.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/remanga.js",
-    "notes": "Использует API v2 (api.remanga.org/api/v2). 18+ и платные главы требуют Bearer token — вставьте в настройках."
+    "notes": "API v2 (api.remanga.org/api/v2). 18+ и платные главы требуют токен — в настройках источника можно вставить либо значение cookie auth:token, либо полную строку Cookie (расширение само вытащит auth:token). Токен можно достать и без DevTools: в браузере открыть https://remanga.org/api/v2/auth/me/ — если авторизован на сайте, в ответе будет token."
 }];
 
 const RM_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+const RM_BASE = "https://remanga.org";
+const RM_API = "https://api.remanga.org/api/v2";
+
+// Принимает и «голый» токен, и полную строку cookie, и строку вида "auth:token=..."
+function rmNormToken(raw) {
+    let s = String(raw == null ? "" : raw).trim();
+    if (!s) return "";
+    s = s.replace(/^Bearer\s+/i, "");
+    if (s.toLowerCase().indexOf("auth:token=") >= 0) {
+        const m = s.match(/auth:token=([^;\s]+)/);
+        s = m ? decodeURIComponent(m[1]) : s;
+    }
+    return s.replace(/^["']|["']$/g, "").trim();
+}
 
 class DefaultExtension extends MProvider {
     constructor() {
@@ -23,22 +37,36 @@ class DefaultExtension extends MProvider {
         this.client = new Client();
     }
 
+    token() {
+        return rmNormToken((new SharedPreferences()).get("authToken"));
+    }
+
     get headers() {
         const h = {
             "User-Agent": RM_UA,
             "Accept": "application/json",
             "Accept-Language": "ru,en;q=0.8",
-            "Referer": this.source.baseUrl + "/"
+            "Referer": RM_BASE + "/"
         };
-        const token = (new SharedPreferences()).get("authToken");
+        const token = this.token();
         if (token) h["Authorization"] = "Bearer " + token;
         return h;
     }
 
+    // Картинки отдаются только с Referer remanga.org, без него reimg.org -> 403.
+    get imgHeaders() {
+        return {
+            "User-Agent": RM_UA,
+            "Referer": RM_BASE + "/",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        };
+    }
+
     absImg(u) {
         if (!u) return "";
-        if (u.startsWith("http")) return u;
-        return this.source.baseUrl + (u.startsWith("/") ? u : "/" + u);
+        const s = String(u);
+        if (s.startsWith("http")) return s;
+        return RM_BASE + (s.startsWith("/") ? s : "/" + s);
     }
 
     parseList(body) {
@@ -55,7 +83,7 @@ class DefaultExtension extends MProvider {
 
     async getPopular(page) {
         const res = await this.client.get(
-            `${this.source.apiUrl}/search/catalog/?count=30&page=${page}&ordering=-rating`,
+            `${RM_API}/search/catalog/?count=30&page=${page}&ordering=-rating`,
             this.headers
         );
         if (res.statusCode !== 200) return { list: [], hasNextPage: false };
@@ -64,7 +92,7 @@ class DefaultExtension extends MProvider {
 
     async getLatestUpdates(page) {
         const res = await this.client.get(
-            `${this.source.apiUrl}/search/catalog/?count=30&page=${page}&ordering=-chapter_date`,
+            `${RM_API}/search/catalog/?count=30&page=${page}&ordering=-chapter_date`,
             this.headers
         );
         if (res.statusCode !== 200) return { list: [], hasNextPage: false };
@@ -75,14 +103,14 @@ class DefaultExtension extends MProvider {
         // If query is provided use the search endpoint; otherwise use the catalog endpoint with filter params.
         if (query) {
             const res = await this.client.get(
-                `${this.source.apiUrl}/search/?query=${encodeURIComponent(query)}&count=30&field=titles&page=${page}`,
+                `${RM_API}/search/?query=${encodeURIComponent(query)}&count=30&field=titles&page=${page}`,
                 this.headers
             );
             if (res.statusCode !== 200) return { list: [], hasNextPage: false };
             return this.parseList(res.body);
         }
 
-        let url = `${this.source.apiUrl}/search/catalog/?count=30&page=${page}`;
+        let url = `${RM_API}/search/catalog/?count=30&page=${page}`;
         if (filters && filters.length) {
             // [0] SortFilter → ordering
             const f0 = filters[0];
@@ -119,9 +147,9 @@ class DefaultExtension extends MProvider {
     }
 
     async getDetail(dir) {
-        const infoRes = await this.client.get(`${this.source.apiUrl}/titles/${dir}/`, this.headers);
+        const infoRes = await this.client.get(`${RM_API}/titles/${dir}/`, this.headers);
         if (infoRes.statusCode !== 200) {
-            return { name: dir, imageUrl: "", description: "(Ошибка — возможно нужен Bearer token в настройках)", status: 5, genre: [], chapters: [] };
+            return { name: dir, imageUrl: "", description: `(Ошибка загрузки: HTTP ${infoRes.statusCode})`, status: 5, genre: [], chapters: [] };
         }
         const body = JSON.parse(infoRes.body);
         const t = body.content || body.results || body;
@@ -129,10 +157,11 @@ class DefaultExtension extends MProvider {
 
         // Chapters — paginate through /titles/chapters/?branch_id=X&page=N
         const chapters = [];
+        const withToken = !!this.token();
         let page = 1;
         while (page <= 10 && branchId) {
             const cres = await this.client.get(
-                `${this.source.apiUrl}/titles/chapters/?branch_id=${branchId}&page=${page}&count=500&ordering=-index&user_data=1`,
+                `${RM_API}/titles/chapters/?branch_id=${branchId}&page=${page}&count=500&ordering=-index&user_data=1`,
                 this.headers
             );
             if (cres.statusCode !== 200) break;
@@ -148,7 +177,7 @@ class DefaultExtension extends MProvider {
                 const volSuffix = (c.tome != null && c.tome !== 0 && c.tome !== "0") ? ` (т. ${c.tome})` : "";
                 chapters.push({
                     name: `Глава ${c.chapter}${chTitle}${volSuffix}`,
-                    url: `${this.source.apiUrl}/titles/chapters/${c.id}/`,
+                    url: `${RM_API}/titles/chapters/${c.id}/`,
                     dateUpload: c.upload_date ? new Date(c.upload_date).valueOf().toString() : Date.now().toString(),
                     scanlator: (c.publishers || []).map(p => p.name).join(", ") || null
                 });
@@ -160,10 +189,15 @@ class DefaultExtension extends MProvider {
         let genre = [];
         if (Array.isArray(t.genres)) genre = t.genres.map(g => g.name || "").filter(x => x);
 
+        let description = (t.description || "").replace(/<[^>]+>/g, "");
+        if (!withToken) {
+            description += "\n\n— Описание может быть неполным (18+ скрыто). Чтобы видеть 18+ и платные главы, вставьте токен в настройках источника.";
+        }
+
         return {
             name: t.main_name || t.rus_name || t.secondary_name || dir,
             imageUrl: this.absImg((t.img && (t.img.mid || t.img.high)) || (t.cover && (t.cover.mid || t.cover.high)) || ""),
-            description: (t.description || "").replace(/<[^>]+>/g, ""),
+            description: description,
             author: (t.publishers || []).map(p => p.name || "").filter(x => x).join(", "),
             genre: genre,
             status: this.statusFromId(t.status && t.status.id),
@@ -186,7 +220,7 @@ class DefaultExtension extends MProvider {
                 flat.push(p);
             }
         }
-        return flat.map(p => ({ url: p.link, headers: this.headers }));
+        return flat.map(p => ({ url: this.absImg(p.link), headers: this.imgHeaders }));
     }
 
     getFilterList() {
@@ -251,11 +285,11 @@ class DefaultExtension extends MProvider {
         return [{
             key: "authToken",
             editTextPreference: {
-                title: "Bearer token",
-                summary: "Из DevTools → Network после логина. Нужен для 18+ и платных глав.",
+                title: "Токен авторизации",
+                summary: "Нужен для 18+ и платных глав. Вставьте значение cookie auth:token (или всю строку Cookie целиком — расширение найдёт auth:token само). Где взять: авторизуйтесь на remanga.org, затем откройте https://remanga.org/api/v2/auth/me/ — если поле token есть в ответе, скопируйте его. Альтернатива — DevTools: F12 → Application → Cookies → remanga.org → auth:token.",
                 value: "",
-                dialogTitle: "Token",
-                dialogMessage: "Без слова Bearer"
+                dialogTitle: "Токен Remanga",
+                dialogMessage: "Можно вставить и сам токен, и всю строку cookie"
             }
         }];
     }
