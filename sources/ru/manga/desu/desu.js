@@ -8,15 +8,34 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": true,
-    "version": "0.6.0",
+    "version": "0.7.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/desu.js",
-    "notes": "Desu.me → desu.city → desu.uno. Старый /manga/api убит (410 Gone). Каталог/поиск — HTML, детали/главы/страницы — новый JSON API /api/manga/{id}."
+    "notes": "Desu.me → desu.city → desu.uno. Старый /manga/api убит (410 Gone). Каталог/поиск — HTML, детали/главы/страницы — новый JSON API /api/manga/{id}. 0.7.0: все запросы идут только на абсолютные URL."
 }];
 
 const DESU_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const DESU_PAGE_SIZE = 24;
+// Never rely on this.source.baseUrl: if it is missing the core gets a relative
+// URL and throws "[RhttpUnknownException] relative URL without a base".
+const DESU_BASE = "https://desu.uno";
+
+function desuPref(key) {
+    try {
+        const v = (new SharedPreferences()).get(key);
+        if (v === null || v === undefined) return "";
+        const s = String(v).trim();
+        if (!s || s === "null" || s === "undefined") return "";
+        return s;
+    } catch (e) {
+        return "";
+    }
+}
+
+function desuIsAbsolute(u) {
+    return /^https?:\/\//i.test(String(u || ""));
+}
 
 function desuFindFilter(filters, type) {
     if (!filters || !filters.length) return null;
@@ -51,17 +70,26 @@ class DefaultExtension extends MProvider {
     // ---------- helpers ----------
 
     base() {
-        const override = (new SharedPreferences()).get("override_base_url");
-        if (override && override.trim()) return override.trim().replace(/\/+$/, "");
-        return this.source.baseUrl;
+        const override = desuPref("override_base_url");
+        return (override && desuIsAbsolute(override) ? override : DESU_BASE).replace(/\/+$/, "");
     }
 
+    // Returns an absolutely usable URL or "" - never a relative path.
     abs(u) {
         if (!u) return "";
-        if (u.indexOf("http") === 0) return u;
-        if (u.indexOf("//") === 0) return "https:" + u;
+        const s = String(u).trim();
+        if (!s) return "";
+        if (desuIsAbsolute(s)) return s;
+        if (s.indexOf("//") === 0) return "https:" + s;
         const b = this.base();
-        return u.charAt(0) === "/" ? b + u : b + "/" + u;
+        return s.charAt(0) === "/" ? b + s : b + "/" + s;
+    }
+
+    // Same as abs(), but throws away anything that is still not absolute so a
+    // broken value can never reach Client.get().
+    safeUrl(u) {
+        const v = this.abs(u);
+        return desuIsAbsolute(v) ? v : "";
     }
 
     apiManga(id) {
@@ -101,6 +129,51 @@ class DefaultExtension extends MProvider {
         return m2 ? m2[1] : "";
     }
 
+    // Accepts any chapter reference we may have stored over time.
+    // Returns { apiUrl } when the chapter id is known, or { mangaId, chapterNumber }
+    // when only a classic reader URL is available (then the id must be looked up).
+    parseChapterRef(ref) {
+        if (!ref) return null;
+        const s = String(ref).trim();
+        if (!s) return null;
+
+        // Already an API chapter endpoint.
+        let m = s.match(/\/api\/manga\/(\d+)\/chapters\/(\d+)/i);
+        if (m) return { apiUrl: this.safeUrl(this.apiManga(m[1]) + "/chapters/" + m[2]) };
+
+        // Legacy endpoint: /manga/api/1204/chapter/700588
+        m = s.match(/\/manga\/api\/(\d+)\/chapter\/(\d+)/i);
+        if (m) return { apiUrl: this.safeUrl(this.apiManga(m[1]) + "/chapters/" + m[2]) };
+
+        // Classic reader page: /manga/kakegurui.1204/vol22/ch131/rus - only the
+        // chapter NUMBER is present here, so the numeric id needs a lookup.
+        m = s.match(/(?:^|\/)(?:manga|ranobe)\/[^\/]+\.(\d+)\/.*?\/(?:ch|chapter)[-_ ]?([\d.]+)/i);
+        if (m) return { mangaId: m[1], chapterNumber: m[2] };
+
+        return null;
+    }
+
+    async chapterApiByNumber(mangaId, number) {
+        const listUrl = this.safeUrl(this.apiManga(mangaId) + "/chapters");
+        if (!listUrl) return "";
+        const res = await this.client.get(listUrl, this.jsonHeaders);
+        if (res.statusCode !== 200) return "";
+        let arr = [];
+        try {
+            const parsed = JSON.parse(res.body);
+            arr = (parsed && parsed.chapters) || [];
+        } catch (e) {
+            return "";
+        }
+        for (let i = 0; i < arr.length; i++) {
+            const c = arr[i];
+            if (c && String(c.number) === String(number)) {
+                return this.safeUrl(this.apiManga(mangaId) + "/chapters/" + c.id);
+            }
+        }
+        return "";
+    }
+
     emptyDetail(name) {
         return {
             name: name || "",
@@ -126,7 +199,8 @@ class DefaultExtension extends MProvider {
     }
 
     async fetchCatalog(page, opts) {
-        const url = this.buildCatalogUrl(page, opts || {});
+        const url = this.safeUrl(this.buildCatalogUrl(page, opts || {}));
+        if (!url) return { list: [], hasNextPage: false };
         const res = await this.client.get(url, this.headers);
         if (res.statusCode !== 200) return { list: [], hasNextPage: false };
         return this.parseCatalog(res.body, page);
@@ -175,7 +249,7 @@ class DefaultExtension extends MProvider {
                 list.push({
                     name: name,
                     imageUrl: this.abs(imageUrl),
-                    link: href
+                    link: this.abs(href)
                 });
             }
 
@@ -261,7 +335,9 @@ class DefaultExtension extends MProvider {
         const id = this.mangaIdFromLink(link);
         if (!id) return this.emptyDetail(link);
 
-        const res = await this.client.get(this.apiManga(id), this.jsonHeaders);
+        const detailUrl = this.safeUrl(this.apiManga(id));
+        if (!detailUrl) return this.emptyDetail(link);
+        const res = await this.client.get(detailUrl, this.jsonHeaders);
         if (res.statusCode !== 200) return this.emptyDetail(link);
 
         let m = {};
@@ -274,7 +350,8 @@ class DefaultExtension extends MProvider {
 
         // chapters
         const chapters = [];
-        const cRes = await this.client.get(this.apiManga(id) + "/chapters", this.jsonHeaders);
+        const chaptersUrl = this.safeUrl(this.apiManga(id) + "/chapters");
+        const cRes = chaptersUrl ? await this.client.get(chaptersUrl, this.jsonHeaders) : { statusCode: 0 };
         if (cRes.statusCode === 200) {
             try {
                 const parsed = JSON.parse(cRes.body);
@@ -338,14 +415,14 @@ class DefaultExtension extends MProvider {
     // ---------- pages ----------
 
     async getPageList(url) {
-        if (!url) return [];
+        const ref = this.parseChapterRef(url);
+        if (!ref) return [];
 
-        let apiUrl = url;
-        // Backward compatibility: derive the API endpoint from a classic reader URL
-        if (apiUrl.indexOf("/api/manga/") < 0) {
-            const m = String(apiUrl).match(/(?:^|\/)(?:manga|ranobe)\/[^\/]+\.(\d+)\/.*?\/(?:ch|chapter)(\d+)/i);
-            if (m) apiUrl = this.apiManga(m[1]) + "/chapters/" + m[2];
+        let apiUrl = ref.apiUrl || "";
+        if (!apiUrl && ref.mangaId && ref.chapterNumber) {
+            apiUrl = await this.chapterApiByNumber(ref.mangaId, ref.chapterNumber);
         }
+        if (!apiUrl) return [];
 
         const res = await this.client.get(apiUrl, this.jsonHeaders);
         if (res.statusCode !== 200) return [];
