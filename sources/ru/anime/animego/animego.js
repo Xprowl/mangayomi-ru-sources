@@ -10,21 +10,71 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.6.1",
+    "version": "0.7.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animego.js",
-    "notes": "Каталог — бесконечная лента: страница N открывается как /anime/{N} (ноль-индексированная), старый ?page=N больше не листается. Поиск: /search/anime?q=…&page=N. Эпизоды и плееры: AJAX /player/{id}. Kodik → HLS, остальные плееры оставлены iframe-ссылкой."
+    "notes": "Каталог — бесконечная лента: страница N открывается как /anime/{N} (ноль-индексированная), старый ?page=N больше не листается. Поиск: /search/anime?q=… (выдача одна, без страниц), результаты переранжируются локально. Эпизоды и плееры: AJAX /player/{id} с кэшем. CVH отдаётся через API (HLS первым — быстрый старт), Kodik → HLS."
 }];
 
 const AG_BASE = "https://animego.me";
 const AG_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const AG_PAGE_SIZE = 20;
+// CVH (the VK player behind most dubs) identifies itself with a constant
+// publisher/aggregator pair; the embedded iframe carries the same values.
+const AG_CVH_PUBLISHER = "747";
+const AG_CVH_AGGREGATOR = "mali";
 
 function agBase(source) {
     const raw = source && source.baseUrl;
     const s = typeof raw === "string" ? raw.trim() : "";
     return /^https?:\/\//i.test(s) ? s.replace(/\/+$/, "") : AG_BASE;
+}
+
+// Titles are compared in a normalised form: lower case, ё→е, punctuation gone.
+function agNorm(text) {
+    return String(text || "").toLowerCase()
+        .replace(/ё/g, "е")
+        .replace(/[^0-9a-zа-я]+/g, " ")
+        .trim();
+}
+
+// The site's search is an OR-based fuzzy set: a query like "тетрадь смерти"
+// returns everything that has either word. Results that contain the whole
+// query go first; if there are none, results sharing at least one word stay;
+// only when nothing matches at all is the raw order returned. Without this the
+// wanted title can sit below a dozen unrelated ones.
+function agRank(list, query) {
+    const q = agNorm(query);
+    if (!q) return list;
+    const words = q.split(" ").filter(w => w.length >= 2);
+    if (!words.length) words.push(q);
+
+    const scored = list.map((item, index) => {
+        const name = agNorm(item.name);
+        let hits = 0;
+        for (const w of words) {
+            if (name.indexOf(w) >= 0) hits++;
+        }
+        let score = hits * 100;
+        if (name === q) score = 3000;
+        else if (name.indexOf(q) === 0) score = 2000;
+        else if (name.indexOf(q) >= 0) score = 1000;
+        else if (name.indexOf(words[0]) === 0) score += 250;
+        if (hits === words.length && words.length > 1) score += 400;
+        return { item: item, score: score, hits: hits, index: index };
+    });
+
+    const full = scored.filter(x => x.hits === words.length);
+    const partial = scored.filter(x => x.hits > 0);
+    // A one-word query keeps everything the site returned (its index also matches
+    // other word forms), just ordered by relevance. For several words, results with
+    // the whole phrase win; otherwise those sharing at least one word.
+    const pool = words.length === 1
+        ? scored
+        : (full.length ? full : (partial.length ? partial : scored));
+    pool.sort((a, b) => b.score - a.score || a.index - b.index);
+    return pool.map(x => x.item);
 }
 
 class DefaultExtension extends MProvider {
@@ -125,9 +175,13 @@ class DefaultExtension extends MProvider {
 
     async search(query, page, filters) {
         if (query && query.trim()) {
-            const res = await this.client.get(`${agBase(this.source)}/search/anime?q=${encodeURIComponent(query.trim())}&page=${page}`, this.headers);
+            // The search endpoint ignores &page and always returns the whole fuzzy
+            // result set, so one request is all there is; rank it locally instead of
+            // pretending there are more pages.
+            const res = await this.client.get(`${agBase(this.source)}/search/anime?q=${encodeURIComponent(query.trim())}`, this.headers);
             if (!res || res.statusCode !== 200) return { list: [], hasNextPage: false };
-            return this.parseCatalog(res.body);
+            const parsed = this.parseCatalog(res.body);
+            return { list: agRank(parsed.list, query), hasNextPage: false };
         }
 
         // Path-based filters: /anime/genre/{slug}, /anime/status/{slug}, /anime/type/{slug}
@@ -170,6 +224,26 @@ class DefaultExtension extends MProvider {
         return m ? m[1] : "";
     }
 
+    // The player AJAX (episode ids + translation buttons) is fetched both when the
+    // anime page opens and when an episode is tapped. It changes rarely, so a short
+    // in-memory cache saves a whole round trip on every episode click.
+    async playerContent(animeId) {
+        const id = String(animeId || "");
+        if (!id) return "";
+        const now = Date.now();
+        if (!this._playerCache) this._playerCache = {};
+        const hit = this._playerCache[id];
+        if (hit && now - hit.at < 5 * 60 * 1000) return hit.content;
+
+        const res = await this.client.get(`${agBase(this.source)}/player/${id}`, this.ajaxHeaders);
+        if (!res || res.statusCode !== 200) return "";
+        let content = "";
+        try { content = (JSON.parse(res.body).data || {}).content || ""; } catch (e) { return ""; }
+        content = content.replace(/&amp;/g, "&");
+        this._playerCache[id] = { at: now, content: content };
+        return content;
+    }
+
     async getDetail(url) {
         // Only the player AJAX is needed: it carries every episode id, its number
         // and the player buttons for all dubs.
@@ -177,12 +251,8 @@ class DefaultExtension extends MProvider {
         if (!animeId) return { name: "", imageUrl: "", description: "", genre: [], status: 5, episodes: [] };
 
         const empty = { name: "", imageUrl: "", description: "", genre: [], status: 5, episodes: [] };
-        const playerRes = await this.client.get(`${agBase(this.source)}/player/${animeId}`, this.ajaxHeaders);
-        if (!playerRes || playerRes.statusCode !== 200) return empty;
-
-        let content = "";
-        try { content = (JSON.parse(playerRes.body).data || {}).content || ""; } catch (e) { return empty; }
-        content = content.replace(/&amp;/g, "&");
+        const content = await this.playerContent(animeId);
+        if (!content) return empty;
 
         // CVH/AniBoom links inside the HTML point at episode 1 with the default dub;
         // the current episode and the chosen translation are known per episode, so
@@ -271,49 +341,52 @@ class DefaultExtension extends MProvider {
         const headers = { "User-Agent": AG_UA, "Referer": "https://animego.me/", "Origin": "https://animego.me" };
         const seen = {};
         const prefix = translation ? `${translation} · ` : "";
-        // Field names are not proof of resolution (mpeg4kUrl may hold a 720p file),
-        // so they are labelled as ranks and HLS is offered first for adaptive quality.
+        // HLS goes first: it is segmented and starts playing almost immediately,
+        // while the progressive MP4 files are 200–300 MB and make the player wait
+        // for a large buffer (which is what felt slow next to AniStar).
         const mpeg = [
-            ["mpeg4kUrl", "4K"], ["mpeg2kUrl", "2K"], ["mpegQhdUrl", "1440p"],
             ["mpegFullHdUrl", "1080p"], ["mpegHighUrl", "720p"], ["mpegMediumUrl", "480p"],
-            ["mpegLowUrl", "360p"], ["mpegLowestUrl", "240p"], ["mpegTinyUrl", "144p"]
+            ["mpegLowUrl", "360p"], ["mpegLowestUrl", "240p"], ["mpegTinyUrl", "144p"],
+            ["mpegQhdUrl", "1440p"], ["mpeg2kUrl", "2K"], ["mpeg4kUrl", "4K"]
         ];
         const push = (u, label) => {
             if (!u || seen[u]) return;
             seen[u] = true;
             videos.push({ url: u, originalUrl: u, quality: label, headers });
         };
-        // Progressive MP4 first: it always plays, while the VK-style adaptive HLS
-        // uses relative sub-playlists that some players cannot follow.
-        for (const m of mpeg) push(info.sources[m[0]], `AnimeGO · ${prefix}${m[1]} (mp4)`);
         if (info.sources.hlsUrl) push(info.sources.hlsUrl, `AnimeGO · ${prefix}HLS (adaptive)`);
+        for (const m of mpeg) push(info.sources[m[0]], `AnimeGO · ${prefix}${m[1]} (mp4)`);
         return videos;
     }
 
-    async cvhResolve(animeId, epNumber, translationName) {
-        const playerRes = await this.client.get(`${agBase(this.source)}/player/${animeId}`, this.ajaxHeaders);
-        if (!playerRes || playerRes.statusCode !== 200) return null;
-        let content = "";
-        try { content = (JSON.parse(playerRes.body).data || {}).content || ""; } catch (e) { return null; }
-        content = content.replace(/&amp;/g, "&");
-        const cvhTag = content.match(/<[a-z]+[^>]*data-player="[^"]*cdn-iframe[^"]*"[^>]*>/i);
+    async cvhResolve(animeId, epNumber, translationName, content) {
+        let html = content;
+        if (!html) html = await this.playerContent(animeId);
+        if (!html) return null;
+
+        const cvhTag = html.match(/<[a-z]+[^>]*data-player="[^"]*cdn-iframe[^"]*"[^>]*>/i);
         if (!cvhTag) return null;
         // /cdn-iframe/{titleId}/{episode}/{???}?dubbing=…
         const path = cvhTag[0].match(/cdn-iframe\/(\d+)/);
         const titleId = path ? path[1] : "";
         if (!titleId) return null;
-        // The publisher/aggregator ids live in the embedded iframe markup.
-        const iframeUrl = this.absUrl((cvhTag[0].match(/data-player="([^"]+)"/) || [])[1] || "");
-        const iframe = iframeUrl ? await this.client.get(iframeUrl, this.headers) : null;
-        let publisherId = "", aggregator = "";
-        if (iframe && iframe.statusCode === 200) {
-            const pm = iframe.body.match(/data-publisher-id="(\d+)"/);
-            const am = iframe.body.match(/data-aggregator="([^"]+)"/);
-            publisherId = pm ? pm[1] : "";
-            aggregator = am ? am[1] : "";
+
+        // Publisher/aggregator are constant for this player, so the embedded iframe
+        // page is only fetched if the defaults are ever rejected.
+        let publisherId = AG_CVH_PUBLISHER;
+        let aggregator = AG_CVH_AGGREGATOR;
+        let list = await this.cvhPlaylist(titleId, publisherId, aggregator);
+        if (!list || !list.items) {
+            const iframeUrl = this.absUrl((cvhTag[0].match(/data-player="([^"]+)"/) || [])[1] || "");
+            const iframe = iframeUrl ? await this.client.get(iframeUrl, this.headers) : null;
+            if (iframe && iframe.statusCode === 200) {
+                const pm = iframe.body.match(/data-publisher-id="(\d+)"/);
+                const am = iframe.body.match(/data-aggregator="([^"]+)"/);
+                publisherId = pm ? pm[1] : "";
+                aggregator = am ? am[1] : "";
+                if (publisherId) list = await this.cvhPlaylist(titleId, publisherId, aggregator);
+            }
         }
-        if (!publisherId) return null;
-        const list = await this.cvhPlaylist(titleId, publisherId, aggregator);
         if (!list || !list.items) return null;
         const wanted = String(epNumber || "");
         let item = list.items.filter(x => String(x.episode) === wanted);
@@ -329,7 +402,8 @@ class DefaultExtension extends MProvider {
             return rank(a) - rank(b);
         });
         const info = await this.cvhVideo(item[0].vkId);
-        return this.cvhVideos(info, translationName || item[0].voiceStudio || "", epNumber);
+        // Label with the studio that actually answered, not with the requested one.
+        return this.cvhVideos(info, item[0].voiceStudio || translationName || "", epNumber);
     }
 
     async getVideoList(url) {
@@ -338,20 +412,21 @@ class DefaultExtension extends MProvider {
         if (ref) return await this.resolveEpisode(ref.animeId, ref.episodeId, ref.translationId);
 
         const u = this.absUrl(url);
-        const res = await this.client.get(u, this.ajaxHeaders);
-        if (!res || res.statusCode !== 200) return [];
-        let content = "";
-        try { content = (JSON.parse(res.body).data || {}).content || ""; } catch (e) { return []; }
-        content = content.replace(/&amp;/g, "&");
+        const playerId = (u.match(/\/player\/(\d+)/) || [])[1] || "";
+        const content = playerId ? await this.playerContent(playerId) : "";
+        if (!content) {
+            const res = await this.client.get(u, this.ajaxHeaders);
+            if (!res || res.statusCode !== 200) return [];
+            let body = "";
+            try { body = (JSON.parse(res.body).data || {}).content || ""; } catch (e) { return []; }
+            return await this.videosFromPlayerContent(body.replace(/&amp;/g, "&"));
+        }
         return await this.videosFromPlayerContent(content);
     }
 
     async resolveEpisode(animeId, episodeId, translationId) {
-        const playerRes = await this.client.get(`${agBase(this.source)}/player/${animeId}`, this.ajaxHeaders);
-        if (!playerRes || playerRes.statusCode !== 200) return [];
-        let content = "";
-        try { content = (JSON.parse(playerRes.body).data || {}).content || ""; } catch (e) { return []; }
-        content = content.replace(/&amp;/g, "&");
+        const content = await this.playerContent(animeId);
+        if (!content) return [];
 
         const translations = this.parseTranslations(content);
         const tr = translations.filter(t => String(t.id) === String(translationId))[0] || translations[0] || { id: "", name: "" };
@@ -367,24 +442,15 @@ class DefaultExtension extends MProvider {
             break;
         }
 
-        let videos = await this.videosFromPlayerContent(content, epNumber, tr.name);
-
-        // CVH links in the HTML always point at episode 1, so for any other episode
-        // (or another dub) rebuild them through the CVH API.
-        if (epNumber && epNumber !== "1") {
-            try {
-                const cvh = await this.cvhResolve(animeId, epNumber, tr.name);
-                if (cvh && cvh.length) videos = cvh;
-            } catch (e) { /* keep fallback */ }
+        // CVH and the other players are independent: start both, but do not wait for
+        // the slower one (Kodik makes extra requests) when CVH already answered.
+        const othersPromise = this.videosFromPlayerContent(content, epNumber, tr.name).catch(() => []);
+        let cvh = null;
+        if (epNumber) {
+            cvh = await this.cvhResolve(animeId, epNumber, tr.name, content).catch(() => null);
         }
-        if (!videos.length && epNumber) {
-            // Nothing playable from the static markup — try CVH anyway.
-            try {
-                const cvh = await this.cvhResolve(animeId, epNumber, tr.name);
-                if (cvh && cvh.length) videos = cvh;
-            } catch (e) { /* ignore */ }
-        }
-        return videos;
+        if (cvh && cvh.length) return cvh;
+        return await othersPromise;
     }
 
     // AniBoom embeds its stream as a doubly HTML-escaped JSON blob inside the iframe
