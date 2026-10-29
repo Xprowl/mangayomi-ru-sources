@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.1.1",
+    "version": "0.1.2",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -59,7 +59,7 @@ class DefaultExtension extends MProvider {
     async fetch1251(url) {
         const res = await this.client.get(url, this.headers);
         const body = res && res.body ? String(res.body) : "";
-        if (res && res.statusCode === 200 && body && body.indexOf("�") < 0) return body;
+        if (res && res.statusCode === 200 && body && body.indexOf("\uFFFD") < 0) return body;
         const decoded = await this.xhr1251(url);
         return decoded || body;
     }
@@ -99,14 +99,18 @@ class DefaultExtension extends MProvider {
         return asBase(this.source) + (s.startsWith("/") ? s : "/" + s);
     }
 
-    // Titles come from a windows-1251 page read as bytes; U+FFFD markers mean the
-    // decode failed, so fall back to the URL slug.
+    // Titles come from a windows-1251 page. When the text is unreadable (U+FFFD from a
+    // UTF-8 decode of CP1251 bytes) fall back to the readable latin slug in the URL,
+    // e.g. "3274-one-piece-van-pis.html" → "One Piece Van Pis".
     tidyName(name, href) {
-        let s = asUnescape(name);
-        if (s && s.indexOf("�") < 0) return s;
+        const s = asUnescape(name);
+        if (s && s.indexOf("\uFFFD") < 0) return s;
         const m = String(href || "").match(/\/(\d+)-([^/.]+)\.html/);
         if (!m) return s || String(href || "");
-        return m[2].replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+        return m[2]
+            .replace(/-+/g, " ")
+            .replace(/\b([a-z])/g, c => c.toUpperCase())
+            .trim();
     }
 
     parseCatalog(htmlBody) {
@@ -202,16 +206,14 @@ class DefaultExtension extends MProvider {
         if (!body) return [];
 
         const episodes = [];
-        // Each playlist entry starts with title:"…"; the number of entries is the
-        // episode count (the field order inside an entry varies by title).
-        const titleRe = /title:"([^"]*)"/g;
+        // Each playlist entry starts with title:"…"; only those are episodes. Looking
+        // for title:"…" anywhere also matches the quality labels inside files[].
+        const titleRe = /\{\s*\n?\s*title:"([^"]*)"/g;
         let m;
         let n = 0;
         while ((m = titleRe.exec(body)) !== null) {
-            const title = asUnescape(m[1]);
-            // Skip non-episode titles (quality labels inside files[]/files_mp4[]).
-            if (/^\d{3,4}$/.test(title)) continue;
             n++;
+            const title = asUnescape(m[1]) || `Серия ${n}`;
             // Each episode URL re-fetches the same player page and picks the n-th item.
             episodes.push({
                 name: title,
@@ -243,39 +245,19 @@ class DefaultExtension extends MProvider {
 
         const videos = [];
         const seen = {};
-        const addVideo = (u, label) => {
+        const addVideo = (u, label, hdrs) => {
             const full = this.abs(u);
             if (!full || seen[full]) return;
             seen[full] = true;
-            videos.push({ url: full, originalUrl: full, quality: label, headers: { "User-Agent": this.headers["User-Agent"], "Referer": asBase(this.source) + "/" } });
+            videos.push({
+                url: full,
+                originalUrl: full,
+                quality: label,
+                headers: hdrs || { "User-Agent": this.headers["User-Agent"], "Referer": asBase(this.source) + "/" }
+            });
         };
 
-        // HLS from the playlist_hls.php proxy link (file:"…?360=<encoded>&720=<encoded>").
-        // AniStar always serves this proxy form, and the proxy is required anyway: raw
-        // sfv URLs carry a signed key with "+" and are rejected (403).
-        const proxyM = chunk.match(/file:"(\/test\/player2\/playlist_hls\.php[^"]*)"/);
-        if (proxyM) {
-            const proxyRes = await this.fetch1251(this.abs(proxyM[1]));
-            if (proxyRes) {
-                const lines = proxyRes.split("\n").map(x => x.trim()).filter(l => l && !l.startsWith("#"));
-                const tagPath = String(proxyM[1]).indexOf("720=") >= 0 ? /\/720\./ : /\/360\./;
-                // Each stream is wrapped in the proxy again: the raw sfv URL (signed key
-                // with "+") is rejected directly, the proxied one plays.
-                for (const line of lines) {
-                    const tag = /\/720\./.test(line) ? "HQ" : /\/360\./.test(line) ? "SD" : (tagPath.test(line) ? "HQ" : "stream");
-                    const wrapped = `${asBase(this.source)}/test/player2/playlist_hls.php?q=${encodeURIComponent(line)}&type=.mp4`;
-                    addVideo(wrapped, `AniStar · HLS ${tag}`);
-                }
-            }
-        } else {
-            // Some pages expose the streams directly.
-            const hlsRe = /file:"(https:[^"]+\.m3u8[^"]*)"/g;
-            let m;
-            while ((m = hlsRe.exec(chunk)) !== null) {
-                addVideo(`${asBase(this.source)}/test/player2/playlist_hls.php?q=${encodeURIComponent(m[1])}&type=.mp4`, "AniStar · HLS");
-            }
-        }
-        // MP4 variants from files_mp4[]
+        // MP4 first: these are exact files and play everywhere.
         {
             const mp4Re = /title:"([^"]*)"\s*,\s*file:"(https:[^"]+\.mp4[^"]*)"/g;
             let m;
@@ -284,30 +266,27 @@ class DefaultExtension extends MProvider {
             }
         }
 
-        // Block-based playlists (older layout): resolve the master playlist directly.
-        if (videos.length === 0) {
-            const master = chunk.match(/file:"(\/test\/player2\/playlist_hls\.php[^"]*)"/);
-            if (master) {
-                const plBody = await this.fetch1251(this.abs(master[1]));
-                if (plBody) {
-                    const lines = plBody.split("\n").map(x => x.trim());
-                    for (let i = 0; i < lines.length; i++) {
-                        const line = lines[i];
-                        if (!line || line.startsWith("#")) continue;
-                        const tag = line.indexOf("sfv.") >= 0 ? "HQ" : line.indexOf("sf2.") >= 0 ? "SD" : `#${i}`;
-                        addVideo(line, `AniStar · HLS ${tag}`);
-                    }
-                }
-            }
+        // HLS: the site's own master playlist is the ONLY working route — it proxies the
+        // signed sfv CDN links (raw ones answer 403) and must not be wrapped again.
+        const masterM = chunk.match(/file:"(\/test\/player2\/playlist_hls\.php\?[^"]*)"/);
+        if (masterM) {
+            const info = this.parseProxyParams(masterM[1]);
+            addVideo(masterM[1], `AniStar · HLS (${info.length > 1 ? "адаптивный" : "поток"})`);
         }
 
-        // MP4 first: some players cannot follow the adaptive playlist.
-        videos.sort((a, b) => {
-            const am = a.quality.indexOf("MP4") >= 0 ? 0 : 1;
-            const bm = b.quality.indexOf("MP4") >= 0 ? 0 : 1;
-            return am - bm;
-        });
         return videos;
+    }
+
+    // playlist_hls.php?360=<encoded>&720=<encoded>&type=.mp4 → list of available streams
+    parseProxyParams(proxyUrl) {
+        const out = [];
+        const m = String(proxyUrl || "").match(/[?&](\d{3,4})=([^&]+)/g) || [];
+        for (const pair of m) {
+            const parts = pair.replace(/^[?&]/, "").split("=");
+            if (!parts[1]) continue;
+            try { out.push({ quality: parts[0], url: decodeURIComponent(parts[1]) }); } catch (e) { /* skip */ }
+        }
+        return out;
     }
     getFilterList() {
         return [{
