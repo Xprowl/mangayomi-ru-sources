@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.3.2",
+    "version": "0.3.3",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -42,6 +42,18 @@ function asUnescape(s) {
 
 // CP1251 byte → character. The 0xC0–0xFF range is contiguous, 0xA8/0xB8 are Ё/ё.
 const AS_CP1251_HIGH = "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюяЁё";
+// The 0x80–0xBF half of the same table (punctuation, Ukrainian/Serbian letters).
+const AS_CP1251_LOW = "ЂЃ‚ѓ„…†‡€‰Љ‹ЊЌЋЏђ‘’“”•–—\u0098™љ›њќћџ\u00A0ЎўЈ¤Ґ¦§Ё©Є«¬\u00AD®Ї°±Ііґµ¶·ё№є»јЅѕї";
+
+function asCp1251Byte(ch) {
+    const c = ch.charCodeAt(0);
+    if (c < 0x80) return c;
+    let i = AS_CP1251_LOW.indexOf(ch);
+    if (i >= 0) return 0x80 + i;
+    i = AS_CP1251_HIGH.indexOf(ch);
+    if (i >= 0 && i < 64) return 0xC0 + i;
+    return -1;
+}
 
 function asDecode1251(bytes) {
     if (!bytes || !bytes.length) return "";
@@ -88,23 +100,32 @@ const AS_LATIN1_TO_CP1251 = {
     0xA8: "Ё", 0xB8: "ё", 0xB9: "№"
 };
 
-// True when the string looks like CP1251 bytes read as Latin-1 ("Ìàãèÿ"): mostly
-// characters in 0xC0–0xFF together with spaces, digits and separators.
+// True when the string looks like CP1251 bytes read as Latin-1 ("Ìàãèÿ"): real
+// Cyrillic is absent and at least two mapped characters stand next to each other.
+// Two in a row are enough because mangled titles often mix Russian words with a
+// long Latin original ("Å, äðóã / Kanojo no Tomodachi"): the ASCII part must not
+// dilute the evidence, or such titles stay broken.
 function asLooksLatin1(text) {
     const s = String(text || "");
     if (!s) return false;
-    let high = 0, ascii = 0;
+    if (/[\u0400-\u04FF]/.test(s)) return false;
+    let run = 0, best = 0;
     for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i);
-        if (c >= 0xC0 && c <= 0xFF) high++;
-        else if (c < 0x80) ascii++;
+        if (AS_LATIN1_TO_CP1251[s.charCodeAt(i)]) {
+            run++;
+            if (run > best) best = run;
+        } else {
+            run = 0;
+        }
     }
-    // At least three accented characters and virtually no real Cyrillic elsewhere.
-    return high >= 3 && high >= ascii / 3 && !/[\u0400-\u04FF]/.test(s);
+    return best >= 2;
 }
 
 function asRepairLatin1(text) {
     let s = String(text || "");
+    // Case 0: the page is UTF-8 but was decoded as CP1251 ("РЎРµСЂРёСЏ" = "Серия").
+    //         Self-validating: the bytes only form valid UTF-8 when this is the case.
+    s = asRepairUtf8AsCp1251(s);
     // Case 1: CP1251 bytes read as Latin-1 ("Ìàãèÿ" = "Магия").
     if (!asLooksLatin1(s)) return s;
     let out = "";
@@ -115,6 +136,42 @@ function asRepairLatin1(text) {
         else out += s.charAt(i);
     }
     return out;
+}
+
+// Turns "РЎРµСЂРёСЏ" back into "Серия": every character is mapped to the CP1251
+// byte it came from and the bytes are read as UTF-8.
+function asRepairUtf8AsCp1251(text) {
+    const s = String(text || "");
+    if (!s) return s;
+    // Only strings whose characters are all CP1251 codepoints can be rebuilt.
+    const bytes = [];
+    for (let i = 0; i < s.length; i++) {
+        const b = asCp1251Byte(s.charAt(i));
+        if (b < 0) return s;
+        bytes.push(b);
+    }
+    let decoded = "";
+    try {
+        if (typeof TextDecoder === "undefined") return s;
+        try {
+            decoded = new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes));
+        } catch (e) {
+            decoded = new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+            if (decoded.indexOf("\uFFFD") >= 0) return s;
+        }
+    } catch (e) {
+        return s;
+    }
+    if (!decoded || decoded === s) return s;
+    // Accept it only when real Cyrillic came out of it.
+    return /[\u0400-\u04FF]/.test(decoded) ? decoded : s;
+}
+
+// Selected value of a SelectFilter (Mangayomi keeps the chosen index in `state`).
+function asFilterValue(filter) {
+    if (!filter || !filter.values || !filter.values.length) return "";
+    const option = filter.values[filter.state || 0];
+    return option && typeof option === "object" ? (option.value || "") : "";
 }
 
 class DefaultExtension extends MProvider {
@@ -319,9 +376,7 @@ class DefaultExtension extends MProvider {
     async search(query, page, filters) {
         // The DLE search module returns nothing for anime titles, so the catalog is
         // filtered locally instead (page by page, until a match shows up).
-        const genreSlug = (filters && filters[0] && filters[0].values)
-            ? (filters[0].values[filters[0].state || 0].value || "")
-            : "";
+        const genreSlug = asFilterValue(filters && filters[0]) || asFilterValue(filters && filters[1]);
 
         const base = genreSlug
             ? `${asBase(this.source)}/filter/janrs/${encodeURIComponent(genreSlug)}`
@@ -459,27 +514,47 @@ class DefaultExtension extends MProvider {
         return out;
     }
     getFilterList() {
-        return [{
-            type_name: "SelectFilter",
-            type: "genre",
-            name: "Жанр",
-            state: 0,
-            values: [
-                ["— Любой —", ""],
-                ["Экшен", "экшн"], ["Приключения", "приключения"], ["Комедия", "комедия"],
-                ["Драма", "драма"], ["Фэнтези", "фэнтези"], ["Романтика", "романтика"],
-                ["Сёнэн", "сёнэн"], ["Сэйнэн", "сэйнэн"], ["Сёдзё", "сёдзё"],
-                ["Мистика", "мистика"], ["Ужасы", "ужасы"], ["Меха", "меха"],
-                ["Фантастика", "фантастика"], ["Гарем", "гарем"], ["Этти", "этти"],
-                ["Школа", "школа"], ["Повседневность", "повседневность"],
-                ["Боевые искусства", "боевые искусства"], ["Исторический", "исторический"],
-                ["Музыка", "музыка"], ["Спорт", "спорт"], ["Военный", "военный"],
-                ["Детектив", "детектив"], ["Психология", "психология"],
-                ["Пародия", "пародия"], ["Игра", "игра"], ["Исекай", "исекай"],
-                ["Гурман", "гурман"], ["Демоны", "демоны"], ["Вампиры", "вампиры"],
-                ["Хентай", "хентай"]
-            ].map(x => ({ type_name: "SelectOption", name: x[0], value: x[1] }))
-        }];
+        // Values are the words the site itself uses: Cyrillic genres are taken from
+        // /filter/janrs/<word>/, the adult tags keep the site's English spelling.
+        const genres = [
+            "Боевик", "Боевые искусства", "Военное", "Вестерн", "Гарем", "Гурман",
+            "Демоны", "Детектив", "Дзёсэй", "Драма", "Игры", "Исторический", "Китай",
+            "Комедия", "Магия", "Меха", "Музыкальное", "Мюзикл", "Пародия",
+            "Повседневность", "Приключения", "Психологическое", "Романтика", "Самураи",
+            "Сверхъестественное", "Спорт", "Супер сила", "Сэйнэн", "Сёдзё", "Сёдзё-ай",
+            "Сёнен", "Сёнен-ай", "Триллер", "Ужасы", "Фантастика", "Фэнтези", "Школа",
+            "Экшен", "Этти"
+        ];
+        const adult = [
+            "Ahegao", "All sex", "Anal sex", "BDSM", "Big tits", "Blackmail", "Bondage",
+            "Cheating", "Cosplay", "Creampie", "Dark skin", "Drugs", "Elf",
+            "Emotionless sex", "Erotic", "Futanari", "Gangbang", "Gigantic Breasts",
+            "Group", "Group sex", "Gyaru", "Harem", "Horror Oral", "Incest", "Lactation",
+            "Maid", "Milf", "Milk", "Mind Break", "Mind Control", "Monster girl",
+            "Netorare", "NTR", "Nun", "Nurse", "Oral", "Oral sex", "Oral sex Gyaru",
+            "Paizuri", "Pregnant", "Prostitution", "Rape", "School uniform",
+            "Schoolgirl uniform", "Slavery", "Slut", "Small tits", "Softcore", "Student",
+            "Succubus", "Tentacles", "Toys", "Torture", "Trap", "Twins", "Virgin", "Yuri"
+        ];
+        const options = (list) => [["— Любой —", ""]].concat(list.map(x => [x, x]))
+            .map(x => ({ type_name: "SelectOption", name: x[0], value: x[1] }));
+
+        return [
+            {
+                type_name: "SelectFilter",
+                type: "genre",
+                name: "Жанр",
+                state: 0,
+                values: options(genres)
+            },
+            {
+                type_name: "SelectFilter",
+                type: "genre",
+                name: "Теги 18+",
+                state: 0,
+                values: options(adult)
+            }
+        ];
     }
 
     getSourcePreferences() { return []; }
