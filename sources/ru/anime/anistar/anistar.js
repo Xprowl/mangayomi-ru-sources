@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.1.3",
+    "version": "0.1.4",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -143,7 +143,9 @@ class DefaultExtension extends MProvider {
     // e.g. "3274-one-piece-van-pis.html" → "One Piece Van Pis".
     tidyName(name, href) {
         const s = asUnescape(name);
-        const readable = s.replace(/\uFFFD+/g, "").trim();
+        let readable = s.replace(/\uFFFD+/g, "").replace(/\s+/g, " ").trim();
+        // ", / One Piece" → "One Piece": drop separators left behind by the lost Cyrillic.
+        readable = readable.replace(/^[\s/|,\-–—]+|[\s/|,\-–—]+$/g, "").trim();
         if (readable && readable.replace(/[^A-Za-z0-9]/g, "").length >= 2) return readable;
         const m = String(href || "").match(/\/(\d+)-([^/.]+)\.html/);
         if (!m) return readable || String(href || "");
