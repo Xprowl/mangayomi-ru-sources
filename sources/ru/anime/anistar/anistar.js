@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.2.1",
+    "version": "0.3.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -99,24 +99,75 @@ class DefaultExtension extends MProvider {
             if (decodedBytes && decodedBytes.indexOf("\uFFFD") < 0) return decodedBytes;
         }
 
-        // 2) Plain request. Fine when the server already speaks UTF-8.
+        // 2) Plain request. Fine when the server already speaks UTF-8 or the runtime
+        //    honours the charset header of the page.
         const res = await this.client.get(url, this.headers);
         const body = res && res.body ? String(res.body) : "";
         if (res && res.statusCode === 200 && body && body.indexOf("\uFFFD") < 0) return asFixMojibake(body);
 
-        // 3) Transcoding proxy: returns the same page already converted to UTF-8.
-        //    No Referer / Accept-Language here — the proxy reacts to those headers and
-        //    answers with entities, which the browser then decodes differently.
-        const proxied = await this.client.get(AS_PROXY + url, {
-            "Accept": "text/plain",
-            "X-Return-Format": "html"
-        });
+        // 3) Transcoding proxy (markdown): the page is already UTF-8 text here, so
+        //    Cyrillic survives. Parsed by parseMarkdownCatalog / parseMarkdownPage.
+        const proxied = await this.client.get(AS_PROXY + url, { "Accept": "text/plain" });
         const proxiedBody = proxied && proxied.body ? String(proxied.body) : "";
-        const fixed = asFixMojibake(proxiedBody);
-        if (proxied && proxied.statusCode === 200 && fixed && fixed.indexOf("<") >= 0) {
-            return fixed;
+        if (proxied && proxied.statusCode === 200 && proxiedBody.indexOf("Markdown Content") >= 0) {
+            return "ASMD:" + proxiedBody;
         }
         return asFixMojibake(body);
+    }
+
+    // Markdown pages returned by the proxy start with this marker.
+    isMarkdown(body) {
+        return String(body || "").indexOf("ASMD:") === 0;
+    }
+
+    mdText(body) {
+        return String(body || "").replace(/^ASMD:/, "");
+    }
+
+    // Player hash: the site serves it as a constant on the article page; the value
+    // from the p2p player page works for every id.
+    async playerHash(id) {
+        const res = await this.client.get(`${asBase(this.source)}/test/player2/videoas_p2p_new.php?id=` + id + "&hash=", this.headers);
+        const body = res && res.body ? String(res.body) : "";
+        const m = body.match(/hash=([a-f0-9]{32})/);
+        return m ? m[1] : "e86810a34113e404545a05b7e75444b6";
+    }
+
+    // Markdown catalogue of the proxy. Link text is the title, the poster next to it
+    // is the cover: "[Герб демонов / Demons' Crest](https://…/11052-gerb-demonov-….html)"
+    // preceded by "![Image N](…/uploads/posters/11052/…)".
+    parseMarkdownCatalog(md) {
+        const text = String(md || "");
+        // Poster lines: "![Image N](…/uploads/posters/<id>/cover.jpg)"
+        const posters = [];
+        const posterRe = /!\[Image \d+[^\]]*\]\(([^)\s]*?\/uploads\/posters\/(\d+)\/[^)\s]+)\)/g;
+        let p;
+        while ((p = posterRe.exec(text)) !== null) {
+            posters.push({ at: p.index, url: p[1], id: p[2] });
+        }
+
+        // Title links: "[Название](https://…/<id>-slug.html)" — skip "Смотреть".
+        const list = [];
+        const seen = {};
+        const titleRe = /\[([^\]\n]{3,160})\]\((https?:\/\/[^)\s]*?\/(\d+)-[a-z0-9\-]+\.html)\)/g;
+        let m;
+        while ((m = titleRe.exec(text)) !== null) {
+            const name = asUnescape(m[1]).trim();
+            const link = m[2];
+            const id = m[3];
+            if (!name || name === "Смотреть" || seen[id]) continue;
+            seen[id] = true;
+            // Nearest poster within the same card (they are listed just above).
+            let cover = "";
+            for (let i = posters.length - 1; i >= 0; i--) {
+                if (posters[i].at < m.index) {
+                    cover = posters[i].id === id || m.index - posters[i].at < 4000 ? posters[i].url : "";
+                    break;
+                }
+            }
+            list.push({ name: name, imageUrl: cover, link: link });
+        }
+        return { list: list, hasNextPage: list.length >= 8 };
     }
 
     // Raw bytes of the page, or "" when the runtime cannot provide them.
@@ -207,6 +258,7 @@ class DefaultExtension extends MProvider {
         const url = page <= 1 ? `${asBase(this.source)}/new/` : `${asBase(this.source)}/new/page/${page}/`;
         const body = await this.fetch1251(url);
         if (!body) return { list: [], hasNextPage: false };
+        if (this.isMarkdown(body)) return this.parseMarkdownCatalog(this.mdText(body));
         return this.parseCatalog(body);
     }
 
@@ -214,6 +266,7 @@ class DefaultExtension extends MProvider {
         const url = page <= 1 ? `${asBase(this.source)}/anime/` : `${asBase(this.source)}/anime/page/${page}/`;
         const body = await this.fetch1251(url);
         if (!body) return { list: [], hasNextPage: false };
+        if (this.isMarkdown(body)) return this.parseMarkdownCatalog(this.mdText(body));
         return this.parseCatalog(body);
     }
 
@@ -231,7 +284,7 @@ class DefaultExtension extends MProvider {
 
         const body = await this.fetch1251(url);
         if (!body) return { list: [], hasNextPage: false };
-        const parsed = this.parseCatalog(body);
+        const parsed = this.isMarkdown(body) ? this.parseMarkdownCatalog(this.mdText(body)) : this.parseCatalog(body);
 
         if (!query || !query.trim()) return parsed;
 
@@ -246,6 +299,16 @@ class DefaultExtension extends MProvider {
         const empty = { name: "", imageUrl: "", description: "", genre: [], status: 5, episodes: [] };
         if (!body) return empty;
 
+        // Markdown page: no iframe markup, but the player URL is built from the id.
+        if (this.isMarkdown(body)) {
+            const idMatch = pageUrl.match(/\/(\d+)-/);
+            if (!idMatch) return empty;
+            const hash = await this.playerHash(idMatch[1]);
+            if (!hash) return empty;
+            const playerUrl = `${asBase(this.source)}/test/player2/videoas.php?id=${idMatch[1]}&hash=${hash}`;
+            return { name: "", imageUrl: "", description: "", genre: [], status: 5, episodes: await this.parseEpisodes(playerUrl) };
+        }
+
         let playerUrl = "";
         const iframe = body.match(/src="(\/test\/player2\/videoas[^"]*)"/);
         if (iframe) playerUrl = this.abs(asUnescape(iframe[1]));
@@ -256,8 +319,15 @@ class DefaultExtension extends MProvider {
     }
 
     async parseEpisodes(playerUrl) {
-        const body = await this.fetch1251(playerUrl);
+        let body = await this.fetch1251(playerUrl);
         if (!body) return [];
+        // The proxy answers with markdown for this URL — the playlist is not there,
+        // so the playlist is requested without the proxy (it is plain HTML anyway).
+        if (this.isMarkdown(body)) {
+            const direct = await this.client.get(playerUrl, this.headers);
+            body = direct && direct.body ? String(direct.body) : "";
+            if (!body || body.indexOf("playlst") < 0) return [];
+        }
 
         const episodes = [];
         // Each playlist entry starts with title:"…"; only those are episodes. Looking
