@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.1.0",
+    "version": "0.1.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -243,60 +243,59 @@ class DefaultExtension extends MProvider {
 
         const videos = [];
         const seen = {};
-        const headers = { "User-Agent": this.headers["User-Agent"], "Referer": asBase(this.source) + "/" };
-        const push = (u, label, isHls) => {
+        const addVideo = (u, label) => {
             const full = this.abs(u);
             if (!full || seen[full]) return;
             seen[full] = true;
-            videos.push({ url: full, originalUrl: full, quality: label, headers: headers });
+            videos.push({ url: full, originalUrl: full, quality: label, headers: { "User-Agent": this.headers["User-Agent"], "Referer": asBase(this.source) + "/" } });
         };
 
-        // HLS variants from files[]. The site generates only two stream URLs (one per
-        // CDN) regardless of the quality labels, so they are not numbered.
-        const hlsRe = /title:"([^"]*)"\s*,\s*file:"(https:[^"]+\.m3u8[^"]*)"/g;
-        let m;
-        let hlsN = 0;
-        while ((m = hlsRe.exec(chunk)) !== null) {
-            hlsN++;
-            push(m[2], `AniStar · HLS (поток ${hlsN})`, true);
-        }
-        // MP4 variants from files_mp4[] (exact files, no extra requests)
-        const mp4Re = /title:"([^"]*)"\s*,\s*file:"(https:[^"]+\.mp4[^"]*)"/g;
-        while ((m = mp4Re.exec(chunk)) !== null) {
-            push(m[2], `AniStar · MP4 ${m[1]}`, false);
-        }
-
-        // Playlist links (playlist_hls.php) resolve into a master m3u8 with the real
-        // qualities — better than the raw per-CDN URLs above.
-        const masterRe = /file:"(\/test\/player2\/playlist_hls\.php[^"]*)"/;
-        const master = chunk.match(masterRe);
-        if (master) {
-            const plBody = await this.fetch1251(this.abs(master[1]));
-            if (plBody) {
-                const lines = plBody.split("\n").map(x => x.trim());
-                for (let i = 0; i < lines.length; i++) {
-                    const line = lines[i];
-                    if (!line || line.startsWith("#")) continue;
-                    // The CDN only serves two streams (sf2 = 360, sfv = "HQ"); its
-                    // RESOLUTION attribute is wrong, so it is not used for labels.
-                    const tag = line.indexOf("sfv.") >= 0 ? "HQ" : line.indexOf("sf2.") >= 0 ? "SD" : `#${i}`;
-                    push(line, `AniStar · HLS ${tag}`, true);
+        // HLS from the playlist_hls.php proxy link (file:"…?360=<encoded>&720=<encoded>").
+        // AniStar always serves this proxy form, and the proxy is required anyway: raw
+        // sfv URLs carry a signed key with "+" and are rejected (403).
+        const proxyM = chunk.match(/file:"(\/test\/player2\/playlist_hls\.php[^"]*)"/);
+        if (proxyM) {
+            const proxyRes = await this.fetch1251(this.abs(proxyM[1]));
+            if (proxyRes) {
+                const lines = proxyRes.split("\n").map(x => x.trim()).filter(l => l && !l.startsWith("#"));
+                const tagPath = String(proxyM[1]).indexOf("720=") >= 0 ? /\/720\./ : /\/360\./;
+                // Each stream is wrapped in the proxy again: the raw sfv URL (signed key
+                // with "+") is rejected directly, the proxied one plays.
+                for (const line of lines) {
+                    const tag = /\/720\./.test(line) ? "HQ" : /\/360\./.test(line) ? "SD" : (tagPath.test(line) ? "HQ" : "stream");
+                    const wrapped = `${asBase(this.source)}/test/player2/playlist_hls.php?q=${encodeURIComponent(line)}&type=.mp4`;
+                    addVideo(wrapped, `AniStar · HLS ${tag}`);
                 }
+            }
+        } else {
+            // Some pages expose the streams directly.
+            const hlsRe = /file:"(https:[^"]+\.m3u8[^"]*)"/g;
+            let m;
+            while ((m = hlsRe.exec(chunk)) !== null) {
+                addVideo(`${asBase(this.source)}/test/player2/playlist_hls.php?q=${encodeURIComponent(m[1])}&type=.mp4`, "AniStar · HLS");
+            }
+        }
+        // MP4 variants from files_mp4[]
+        {
+            const mp4Re = /title:"([^"]*)"\s*,\s*file:"(https:[^"]+\.mp4[^"]*)"/g;
+            let m;
+            while ((m = mp4Re.exec(chunk)) !== null) {
+                addVideo(m[2], `AniStar · MP4 ${m[1]}`);
             }
         }
 
-        // Older markup keeps everything in a playlist_hls.php proxy link.
+        // Block-based playlists (older layout): resolve the master playlist directly.
         if (videos.length === 0) {
-            const proxy = chunk.match(/file:"(\/test\/player2\/playlist_hls\.php[^"]*)"/);
-            if (proxy) {
-                const plBody = await this.fetch1251(this.abs(proxy[1]));
+            const master = chunk.match(/file:"(\/test\/player2\/playlist_hls\.php[^"]*)"/);
+            if (master) {
+                const plBody = await this.fetch1251(this.abs(master[1]));
                 if (plBody) {
                     const lines = plBody.split("\n").map(x => x.trim());
                     for (let i = 0; i < lines.length; i++) {
                         const line = lines[i];
                         if (!line || line.startsWith("#")) continue;
-                        const q = (lines[i - 1] || "").match(/RESOLUTION=\d+x(\d+)/);
-                        push(line, `AniStar · HLS ${q ? q[1] + "p" : "auto"}`, true);
+                        const tag = line.indexOf("sfv.") >= 0 ? "HQ" : line.indexOf("sf2.") >= 0 ? "SD" : `#${i}`;
+                        addVideo(line, `AniStar · HLS ${tag}`);
                     }
                 }
             }
@@ -310,7 +309,6 @@ class DefaultExtension extends MProvider {
         });
         return videos;
     }
-
     getFilterList() {
         return [{
             type_name: "SelectFilter",
