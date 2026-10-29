@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.1.2",
+    "version": "0.1.3",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -38,6 +38,39 @@ function asUnescape(s) {
         .trim();
 }
 
+// CP1251 byte → character. The 0xC0–0xFF range is contiguous, 0xA8/0xB8 are Ё/ё.
+const AS_CP1251_HIGH = "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюяЁё";
+
+function asDecode1251(bytes) {
+    if (!bytes || !bytes.length) return "";
+    // Native decoder first (some runtimes ship one), manual table as the fallback.
+    try {
+        if (typeof TextDecoder !== "undefined") {
+            const native = new TextDecoder("windows-1251").decode(bytes);
+            if (native && native.indexOf("\uFFFD") < 0) return native;
+        }
+    } catch (e) { /* no native decoder for this label */ }
+
+    let out = "";
+    const chunk = [];
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        if (b < 0x80) chunk.push(String.fromCharCode(b));
+        else if (b >= 0xC0) chunk.push(AS_CP1251_HIGH.charAt(b - 0xC0));
+        else if (b === 0xA8) chunk.push("Ё");
+        else if (b === 0xB8) chunk.push("ё");
+        else chunk.push("");
+    }
+    out = chunk.join("");
+    return out;
+}
+
+// Repairs text that was decoded as UTF-8 from UTF-8 bytes but is still full of U+FFFD,
+// by reading the surviving latin characters of the CP1251 page instead.
+function asFixMojibake(text) {
+    return String(text || "").replace(/\uFFFD+/g, "");
+}
+
 class DefaultExtension extends MProvider {
     constructor() {
         super();
@@ -57,36 +90,42 @@ class DefaultExtension extends MProvider {
     }
 
     async fetch1251(url) {
+        // Mangayomi's Client may hand over a string already decoded as UTF-8, so all
+        // three routes are tried: raw bytes first, then the plain text if it is intact.
+        const bytes = await this.xhrCharset(url);
+        if (bytes) {
+            const decoded = asDecode1251(bytes);
+            if (decoded && decoded.indexOf("\uFFFD") < 0) return decoded;
+            // Recover readable characters from the UTF-8-mangled string when the raw
+            // bytes are unavailable in this runtime.
+            const fixed = asFixMojibake(decodeURIComponent(escape(String(decoded || ""))));
+            if (fixed) return fixed;
+        }
         const res = await this.client.get(url, this.headers);
         const body = res && res.body ? String(res.body) : "";
         if (res && res.statusCode === 200 && body && body.indexOf("\uFFFD") < 0) return body;
-        const decoded = await this.xhr1251(url);
-        return decoded || body;
+        return body;
     }
 
-    xhr1251(url) {
+    // Raw bytes of the page, or "" when the runtime cannot provide them.
+    xhrCharset(url) {
         return new Promise(resolve => {
             try {
-                if (typeof XMLHttpRequest === "undefined" || !/^https?:\/\//i.test(String(url))) return resolve("");
+                if (typeof XMLHttpRequest === "undefined" || !/^https?:\/\//i.test(String(url))) return resolve(null);
                 const xhr = new XMLHttpRequest();
                 xhr.open("GET", url, true);
                 xhr.responseType = "arraybuffer";
                 xhr.setRequestHeader("Accept-Language", "ru-RU,ru;q=0.9");
                 xhr.setRequestHeader("Referer", asBase(this.source) + "/");
                 xhr.onload = function () {
-                    if (xhr.status !== 200 || !xhr.response) return resolve("");
-                    try {
-                        const text = new TextDecoder("windows-1251").decode(new Uint8Array(xhr.response));
-                        resolve(text);
-                    } catch (e) {
-                        resolve("");
-                    }
+                    if (xhr.status !== 200 || !xhr.response) return resolve(null);
+                    resolve(new Uint8Array(xhr.response));
                 };
-                xhr.onerror = function () { resolve(""); };
-                xhr.ontimeout = function () { resolve(""); };
+                xhr.onerror = function () { resolve(null); };
+                xhr.ontimeout = function () { resolve(null); };
                 xhr.send();
             } catch (e) {
-                resolve("");
+                resolve(null);
             }
         });
     }
@@ -104,9 +143,10 @@ class DefaultExtension extends MProvider {
     // e.g. "3274-one-piece-van-pis.html" → "One Piece Van Pis".
     tidyName(name, href) {
         const s = asUnescape(name);
-        if (s && s.indexOf("\uFFFD") < 0) return s;
+        const readable = s.replace(/\uFFFD+/g, "").trim();
+        if (readable && readable.replace(/[^A-Za-z0-9]/g, "").length >= 2) return readable;
         const m = String(href || "").match(/\/(\d+)-([^/.]+)\.html/);
-        if (!m) return s || String(href || "");
+        if (!m) return readable || String(href || "");
         return m[2]
             .replace(/-+/g, " ")
             .replace(/\b([a-z])/g, c => c.toUpperCase())
