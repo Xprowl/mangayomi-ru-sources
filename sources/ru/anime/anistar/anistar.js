@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.1.4",
+    "version": "0.2.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -16,6 +16,8 @@ const mangayomiSources = [{
 }];
 
 const AS_BASE = "https://v31.astar.bz";
+// Transcoding reader (returns the page as UTF-8 text).
+const AS_PROXY = "https://r.jina.ai/";
 const AS_PAGE_SIZE = 10;
 
 function asBase(source) {
@@ -90,20 +92,30 @@ class DefaultExtension extends MProvider {
     }
 
     async fetch1251(url) {
-        // Mangayomi's Client may hand over a string already decoded as UTF-8, so all
-        // three routes are tried: raw bytes first, then the plain text if it is intact.
+        // 1) Raw bytes through XHR (works when the runtime exposes them).
         const bytes = await this.xhrCharset(url);
         if (bytes) {
             const decoded = asDecode1251(bytes);
             if (decoded && decoded.indexOf("\uFFFD") < 0) return decoded;
-            // Recover readable characters from the UTF-8-mangled string when the raw
-            // bytes are unavailable in this runtime.
-            const fixed = asFixMojibake(decodeURIComponent(escape(String(decoded || ""))));
-            if (fixed) return fixed;
         }
+
+        // 2) Plain request. Fine when the server already speaks UTF-8.
         const res = await this.client.get(url, this.headers);
         const body = res && res.body ? String(res.body) : "";
         if (res && res.statusCode === 200 && body && body.indexOf("\uFFFD") < 0) return body;
+
+        // 3) Transcoding proxy: returns the same page already converted to UTF-8.
+        //    This is the route that survives runtimes that neither expose response
+        //    bytes nor decode CP1251 (the text would otherwise be all U+FFFD).
+        const proxied = await this.client.get(AS_PROXY + url, {
+            "User-Agent": this.headers["User-Agent"],
+            "Accept": "text/plain",
+            "X-Return-Format": "html"
+        });
+        const proxiedBody = proxied && proxied.body ? String(proxied.body) : "";
+        if (proxied && proxied.statusCode === 200 && proxiedBody && proxiedBody.indexOf("\uFFFD") < 0) {
+            return proxiedBody;
+        }
         return body;
     }
 
