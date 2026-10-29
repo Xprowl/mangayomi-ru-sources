@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.3.0",
+    "version": "0.3.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -156,6 +156,8 @@ class DefaultExtension extends MProvider {
             const link = m[2];
             const id = m[3];
             if (!name || name === "Смотреть" || seen[id]) continue;
+            // Category pages (/filter/…) also link articles; keep only titles.
+            if (String(link).indexOf("/filter/") >= 0) continue;
             seen[id] = true;
             // Nearest poster within the same card (they are listed just above).
             let cover = "";
