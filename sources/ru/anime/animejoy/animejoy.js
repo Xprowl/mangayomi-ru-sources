@@ -10,21 +10,43 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.3.0",
+    "version": "0.4.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animejoy.js",
-    "notes": "Аниме с русскими субтитрами (DLE). Каталог: /tv-serialy/, /ova/, /anime-films/ — 10 на страницу. Поиск: GET /index.php?do=search&subaction=search&story=... Фильтр по жанру: /tags/<жанр>/. Плееры лежат прямо в HTML (div.playlists-videos): свой playerjs — прямые mp4 1080/720, Kodik — HLS. Остальные (VK, OK, Mail, Dzen, CDA) — iframe."
+    "notes": "Аниме с русскими субтитрами (DLE). Основной адрес animejoy.ru, при недоступности — официальное зеркало otakujoy.fun (актуальные адреса берутся из API зеркал, см. getBase). Каталог: /tv-serialy/, /ova/, /anime-films/. Поиск: GET /index.php?do=search&subaction=search&story=... Фильтр по жанру: /tags/<жанр>/. Плееры: playerjs — прямые mp4 1080/720, Kodik — HLS, остальные iframe."
 }];
 
 const AJ_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const AJ_PAGE_SIZE = 10;
 const AJ_SECTIONS = ["tv-serialy", "ova", "anime-films"];
+// Main address first, then the project's own mirror. animejoy.ru is behind
+// Cloudflare (its TLS cert breaks on some phones), the mirror is not.
+const AJ_FALLBACK_HOSTS = ["otakujoy.fun"];
+// The site publishes its mirror list at /api/. Mostly for reference: the list
+// changes rarely, so the hardcoded mirror above is what actually gets used.
+const AJ_MIRROR_LIST_URL = "https://animejoy.ru/api/";
+// A host that fails once is skipped for a while (dead mirrors cost one timeout).
+const AJ_HOST_COOLDOWN_MS = 10 * 60 * 1000;
 
 function ajBase(source) {
     const raw = source && source.baseUrl;
     const s = typeof raw === "string" ? raw.trim() : "";
     return /^https?:\/\//i.test(s) ? s.replace(/\/+$/, "") : "https://animejoy.ru";
+}
+
+function ajHostOf(url) {
+    const m = String(url || "").match(/^https?:\/\/([^\/?#]+)/i);
+    return m ? m[1].replace(/^www\./i, "") : "";
+}
+
+// Rewrites a link of the working mirror back to the configured base, so the
+// app keeps showing (and caching) the canonical domain.
+function ajRebase(url, base) {
+    const u = String(url || "");
+    const host = ajHostOf(base);
+    if (!host) return u;
+    return u.replace(/^https?:\/\/(?:[a-z0-9-]+\.)*(?:animejoy\.[a-z]+|otakujoy\.fun)/i, "https://" + host);
 }
 
 function ajClean(s) {
@@ -60,20 +82,85 @@ class DefaultExtension extends MProvider {
             "User-Agent": AJ_UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-            "Referer": ajBase(this.source) + "/"
+            "Referer": (this._base || ajBase(this.source)) + "/"
         };
     }
 
     absUrl(u) {
         if (!u) return "";
-        if (u.startsWith("http")) return u;
-        if (u.startsWith("//")) return "https:" + u;
-        return ajBase(this.source) + (u.startsWith("/") ? u : "/" + u);
+        let s = String(u).trim();
+        if (s.startsWith("//")) s = "https:" + s;
+        if (s.startsWith("http")) return ajRebase(s, ajBase(this.source));
+        return ajBase(this.source) + (s.startsWith("/") ? s : "/" + s);
+    }
+
+    // Mirror lists are plain text/HTML with one or more *.host tokens; only
+    // domains that answer for this DLE site are accepted.
+    parseMirrorList(body, base) {
+        const host = ajHostOf(base);
+        const out = [];
+        const re = /(?:https?:\/\/)?((?:[a-z0-9-]+\.)+(?:ru|fun|com|me|top|online|site|xyz|pro|su|cc|one|tv))\b/gi;
+        let m;
+        while ((m = re.exec(String(body || ""))) !== null) {
+            const h = m[1].toLowerCase().replace(/^www\./, "");
+            if (h === host || out.indexOf(h) >= 0) continue;
+            if (!/joy/.test(h)) continue;
+            out.push(h);
+        }
+        return out.slice(0, 6);
+    }
+
+    async getBase() {
+        const base = ajBase(this.source);
+        const host = ajHostOf(base);
+        if (this._base && this._baseHost === host) return this._base;
+        const probe = async (candidate) => {
+            try {
+                const res = await this.client.get(candidate + "/tv-serialy/", this.headers);
+                if (!res || res.statusCode !== 200 || !res.body) return false;
+                return res.body.indexOf("ntitle") >= 0 || res.body.indexOf("shortstory") >= 0;
+            } catch (e) {
+                return false;
+            }
+        };
+        this._dead = this._dead || {};
+        const fresh = (host) => !this._dead[host] || (Date.now() - this._dead[host]) > AJ_HOST_COOLDOWN_MS;
+        let picked = base;
+        if (fresh(host) && !(await probe(base))) this._dead[host] = Date.now();
+        if (picked !== base || this._dead[host]) {
+            picked = "";
+            const candidates = AJ_FALLBACK_HOSTS.map(h => "https://" + h);
+            try {
+                const res = await this.client.get(AJ_MIRROR_LIST_URL, this.headers);
+                if (res && res.statusCode === 200 && res.body) {
+                    for (const h of this.parseMirrorList(res.body, base)) candidates.push("https://" + h);
+                }
+            } catch (e) { /* list unavailable — keep the hardcoded mirror */ }
+            for (const cand of candidates) {
+                const h = ajHostOf(cand);
+                if (!fresh(h)) continue;
+                if (await probe(cand)) { picked = cand; break; }
+                this._dead[h] = Date.now();
+            }
+            if (!picked) picked = base;
+        }
+        this._base = picked;
+        this._baseHost = host;
+        return picked;
+    }
+
+    // External embed ("//kodikplayer.com/...") -> absolute URL of the embed itself.
+    absOrProto(u) {
+        const s = String(u || "").trim();
+        if (s.startsWith("//")) return "https:" + s;
+        return s;
     }
 
     async fetchBody(path) {
+        const base = await this.getBase();
+        const url = path && /^https?:\/\//i.test(path) ? ajRebase(path, base) : base + (String(path).startsWith("/") ? path : "/" + path);
         try {
-            const res = await this.client.get(this.absUrl(path), this.headers);
+            const res = await this.client.get(url, this.headers);
             if (!res || res.statusCode !== 200 || !res.body) return "";
             return res.body;
         } catch (e) {
@@ -164,6 +251,7 @@ class DefaultExtension extends MProvider {
         const groups = [];
         const players = [];
         const rows = [];
+        // Folder levels: "<group>_<folder>_<ep>" = 3, "<group>_<player>_<folder>_<ep>" = 4.
         let levels = 2;
 
         for (const li of doc.select(".playlists-lists li")) {
@@ -173,7 +261,10 @@ class DefaultExtension extends MProvider {
             const parts = id.split("_").filter(x => x !== "");
             if (parts.length === 2) groups.push({ id: id, label: label });
             else if (parts.length === 3) {
-                players.push({ id: id, group: parts[0] + "_" + parts[1], label: label });
+                // Panels 0_N_M of the same group hold range tabs ("291+ серии").
+                const isPanel = Array.from(doc.select(".playlists-lists > div")).some(div => (div.attr("data-id") || "") === parts.slice(0, 2).join("_"));
+                if (isPanel) players.push({ id: id, group: parts[0] + "_" + parts[1], label: label, range: true });
+                else players.push({ id: id, group: parts[0] + "_" + parts[1], label: label });
                 levels = Math.max(levels, 3);
             } else if (parts.length >= 4) {
                 players.push({ id: id, group: parts.slice(0, 2).join("_"), label: label, season: parts.slice(2, -1).join("_") });
@@ -184,7 +275,10 @@ class DefaultExtension extends MProvider {
             const file = li.attr("data-file") || "";
             const id = li.attr("data-id") || "";
             if (!file || !id) continue;
-            rows.push({ file: file, id: id, label: ajClean(li.text || "") });
+            const label = ajClean(li.text || "");
+            // Player tabs of short titles are sometimes junk markers ("." / "\u0060").
+            if (!label || /^[\s.`~\-]+$/.test(label)) continue;
+            rows.push({ file: file, id: id, label: label });
         }
         for (const r of rows) {
             const parts = r.id.split("_").filter(x => x !== "");
@@ -204,7 +298,7 @@ class DefaultExtension extends MProvider {
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01"
         });
-        const url = `${ajBase(this.source)}/engine/ajax/playlists.php?news_id=${m[1]}&xfield=playlist`;
+        const url = `${await this.getBase()}/engine/ajax/playlists.php?news_id=${m[1]}&xfield=playlist`;
         for (let attempt = 0; attempt < 2; attempt++) {
             try {
                 const res = await this.client.get(url, headers);
@@ -270,6 +364,26 @@ class DefaultExtension extends MProvider {
     folderLabel(groupId, folder) {
         void groupId;
         return String(folder);
+    }
+
+    // "291 серия", "1 cерия", "SP 2" -> numbered row; "291+ серии", "TV", "Фильм" -> folder / whole.
+    isEpisodeLabel(label) {
+        const s = this.normLabel(label);
+        if (!s) return false;
+        if (/^\d+\s*(?:серия|эп|ep|series|sezon|season)/i.test(s)) return true;
+        if (/^(?:sp|ova|ona|спешл|recap|рекап|фильм|movie)/i.test(s)) return true;
+        return false;
+    }
+
+    // "1101 серия " / "1 Cерия" -> "1101 серия": mixed latin/cyrillic copies from
+    // the site must still count as the same episode.
+    normLabel(label) {
+        return String(label || "")
+            .replace(/[\u00A0\u2000-\u200B]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase()
+            .replace(/c/g, "с");
     }
 
     // Direct mp4 (playerjs) first, then Kodik HLS, then the third-party iframes.
@@ -367,9 +481,11 @@ class DefaultExtension extends MProvider {
             // folder (season) index that both the rows and the player tabs carry.
             const folder = parts.length >= 4 ? parts.slice(2, parts.length - 1).join("_") : "";
             const inSeason = folder;
-            const hasNum = /^\s*(\d+)\s*(?:серия|эп|ep|series)?/i.test(row.label);
+
             // "TV"/"Фильм" rows are whole-season links; each gets its own entry.
-            const whole = !hasNum;
+            // Folder tabs ("1101-1110", "291+ серии") never are.
+            const isFolderTab = pl.players.some(p => p.range && p.label === row.label);
+            const whole = !this.isEpisodeLabel(row.label) && !isFolderTab;
             g.items.push({
                 player: player,
                 playerId: playerId,
@@ -428,7 +544,8 @@ class DefaultExtension extends MProvider {
             const byLabel = {};
             const labels = [];
             for (const it of numbered) {
-                const key = it.season !== "" && multiGroup ? "s" + it.season + "|" + it.label : it.label;
+                const canon = this.normLabel(it.label);
+                const key = it.season !== "" && multiGroup ? "s" + it.season + "|" + canon : canon;
                 if (!byLabel[key]) {
                     byLabel[key] = [];
                     labels.push(key);
@@ -509,7 +626,7 @@ class DefaultExtension extends MProvider {
         const lines = packed.split("\n").filter(x => x.trim());
         const videos = [];
         const seen = {};
-        const streamHeaders = { "User-Agent": AJ_UA, "Referer": ajBase(this.source) + "/" };
+        const streamHeaders = { "User-Agent": AJ_UA, "Referer": (this._base || ajBase(this.source)) + "/" };
 
         const push = (u, quality, headers) => {
             if (!u || seen[u]) return;
@@ -526,10 +643,10 @@ class DefaultExtension extends MProvider {
 
             if (fileUrl.indexOf("kodik") >= 0) {
                 let kv = [];
-                try { kv = await kodikExtract(this.client, fileUrl, ajBase(this.source), "Kodik"); } catch (e) { kv = []; }
+                try { kv = await kodikExtract(this.client, fileUrl, this._base || ajBase(this.source), "Kodik"); } catch (e) { kv = []; }
                 for (const v of kv) push(v.url, v.quality, v.headers);
                 // Kodik is often geo-blocked: keep its page as a last resort.
-                push(this.absUrl(fileUrl), "Kodik · iframe", streamHeaders);
+                push(this.absOrProto(fileUrl), "Kodik · iframe", streamHeaders);
                 continue;
             }
 
@@ -539,7 +656,7 @@ class DefaultExtension extends MProvider {
                     push(this.absUrl(s.url), s.quality > 0 ? `${provider} ${s.quality}p` : provider, streamHeaders);
                 }
                 // The playerjs wrapper itself plays the same mp4s; keep it last.
-                push(this.absUrl(fileUrl), `${provider} · iframe`, streamHeaders);
+                push(this.absOrProto(fileUrl), `${provider} · iframe`, streamHeaders);
                 continue;
             }
 
@@ -564,7 +681,7 @@ class DefaultExtension extends MProvider {
         if (!pl.rows.length) pl = await this.fetchPlaylistsAjax(body);
         const videos = [];
         const seen = {};
-        const streamHeaders = { "User-Agent": AJ_UA, "Referer": ajBase(this.source) + "/" };
+        const streamHeaders = { "User-Agent": AJ_UA, "Referer": (this._base || ajBase(this.source)) + "/" };
         const push = (u, quality, headers) => {
             if (!u || seen[u]) return;
             seen[u] = true;
@@ -579,16 +696,16 @@ class DefaultExtension extends MProvider {
         for (const file of primary) {
             if (file.indexOf("kodik") >= 0) {
                 let kv = [];
-                try { kv = await kodikExtract(this.client, file, ajBase(this.source), "Kodik"); } catch (e) { kv = []; }
+                try { kv = await kodikExtract(this.client, file, this._base || ajBase(this.source), "Kodik"); } catch (e) { kv = []; }
                 for (const v of kv) push(v.url, v.quality, v.headers);
-                push(this.absUrl(file), "Kodik · iframe", streamHeaders);
+                push(this.absOrProto(file), "Kodik · iframe", streamHeaders);
                 continue;
             }
             if (file.indexOf("playerjs") >= 0 || file.indexOf("file=[") >= 0) {
                 for (const s of this.playerjsSources(file)) {
                     push(this.absUrl(s.url), s.quality > 0 ? "Наш плеер " + s.quality + "p" : "Наш плеер", streamHeaders);
                 }
-                push(this.absUrl(file), "Наш плеер · iframe", streamHeaders);
+                push(this.absOrProto(file), "Наш плеер · iframe", streamHeaders);
                 continue;
             }
             push(this.absUrl(file), "Плеер", streamHeaders);
