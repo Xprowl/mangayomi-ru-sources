@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.3.1",
+    "version": "0.3.2",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -71,6 +71,50 @@ function asDecode1251(bytes) {
 // by reading the surviving latin characters of the CP1251 page instead.
 function asFixMojibake(text) {
     return String(text || "").replace(/\uFFFD+/g, "");
+}
+
+// The runtime sometimes decodes CP1251 bytes as Latin-1/Windows-1252, which turns
+// "Магия" into "Ìàãèÿ". Each character then still holds the original byte value, so the
+// text is repaired by mapping the characters straight back to CP1251.
+const AS_LATIN1_TO_CP1251 = {
+    0xC0: "А", 0xC1: "Б", 0xC2: "В", 0xC3: "Г", 0xC4: "Д", 0xC5: "Е", 0xC6: "Ж", 0xC7: "З",
+    0xC8: "И", 0xC9: "Й", 0xCA: "К", 0xCB: "Л", 0xCC: "М", 0xCD: "Н", 0xCE: "О", 0xCF: "П",
+    0xD0: "Р", 0xD1: "С", 0xD2: "Т", 0xD3: "У", 0xD4: "Ф", 0xD5: "Х", 0xD6: "Ц", 0xD7: "Ч",
+    0xD8: "Ш", 0xD9: "Щ", 0xDA: "Ъ", 0xDB: "Ы", 0xDC: "Ь", 0xDD: "Э", 0xDE: "Ю", 0xDF: "Я",
+    0xE0: "а", 0xE1: "б", 0xE2: "в", 0xE3: "г", 0xE4: "д", 0xE5: "е", 0xE6: "ж", 0xE7: "з",
+    0xE8: "и", 0xE9: "й", 0xEA: "к", 0xEB: "л", 0xEC: "м", 0xED: "н", 0xEE: "о", 0xEF: "п",
+    0xF0: "р", 0xF1: "с", 0xF2: "т", 0xF3: "у", 0xF4: "ф", 0xF5: "х", 0xF6: "ц", 0xF7: "ч",
+    0xF8: "ш", 0xF9: "щ", 0xFA: "ъ", 0xFB: "ы", 0xFC: "ь", 0xFD: "э", 0xFE: "ю", 0xFF: "я",
+    0xA8: "Ё", 0xB8: "ё", 0xB9: "№"
+};
+
+// True when the string looks like CP1251 bytes read as Latin-1 ("Ìàãèÿ"): mostly
+// characters in 0xC0–0xFF together with spaces, digits and separators.
+function asLooksLatin1(text) {
+    const s = String(text || "");
+    if (!s) return false;
+    let high = 0, ascii = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xC0 && c <= 0xFF) high++;
+        else if (c < 0x80) ascii++;
+    }
+    // At least three accented characters and virtually no real Cyrillic elsewhere.
+    return high >= 3 && high >= ascii / 3 && !/[\u0400-\u04FF]/.test(s);
+}
+
+function asRepairLatin1(text) {
+    let s = String(text || "");
+    // Case 1: CP1251 bytes read as Latin-1 ("Ìàãèÿ" = "Магия").
+    if (!asLooksLatin1(s)) return s;
+    let out = "";
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x80) out += s.charAt(i);
+        else if (AS_LATIN1_TO_CP1251[c]) out += AS_LATIN1_TO_CP1251[c];
+        else out += s.charAt(i);
+    }
+    return out;
 }
 
 class DefaultExtension extends MProvider {
@@ -152,7 +196,7 @@ class DefaultExtension extends MProvider {
         const titleRe = /\[([^\]\n]{3,160})\]\((https?:\/\/[^)\s]*?\/(\d+)-[a-z0-9\-]+\.html)\)/g;
         let m;
         while ((m = titleRe.exec(text)) !== null) {
-            const name = asUnescape(m[1]).trim();
+            const name = asRepairLatin1(asUnescape(m[1])).trim();
             const link = m[2];
             const id = m[3];
             if (!name || name === "Смотреть" || seen[id]) continue;
@@ -207,7 +251,7 @@ class DefaultExtension extends MProvider {
     // UTF-8 decode of CP1251 bytes) fall back to the readable latin slug in the URL,
     // e.g. "3274-one-piece-van-pis.html" → "One Piece Van Pis".
     tidyName(name, href) {
-        const s = asUnescape(name);
+        const s = asRepairLatin1(asUnescape(name));
         let readable = s.replace(/\uFFFD+/g, "").replace(/\s+/g, " ").trim();
         // ", / One Piece" → "One Piece": drop separators left behind by the lost Cyrillic.
         readable = readable.replace(/^[\s/|,\-–—]+|[\s/|,\-–—]+$/g, "").trim();
@@ -339,7 +383,7 @@ class DefaultExtension extends MProvider {
         let n = 0;
         while ((m = titleRe.exec(body)) !== null) {
             n++;
-            const title = asUnescape(m[1]) || `Серия ${n}`;
+            const title = asRepairLatin1(asUnescape(m[1])) || `Серия ${n}`;
             // Each episode URL re-fetches the same player page and picks the n-th item.
             episodes.push({
                 name: title,
