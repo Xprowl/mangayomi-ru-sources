@@ -8,7 +8,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.2.0",
+    "version": "0.2.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
@@ -95,28 +95,28 @@ class DefaultExtension extends MProvider {
         // 1) Raw bytes through XHR (works when the runtime exposes them).
         const bytes = await this.xhrCharset(url);
         if (bytes) {
-            const decoded = asDecode1251(bytes);
-            if (decoded && decoded.indexOf("\uFFFD") < 0) return decoded;
+            const decodedBytes = asDecode1251(bytes);
+            if (decodedBytes && decodedBytes.indexOf("\uFFFD") < 0) return decodedBytes;
         }
 
         // 2) Plain request. Fine when the server already speaks UTF-8.
         const res = await this.client.get(url, this.headers);
         const body = res && res.body ? String(res.body) : "";
-        if (res && res.statusCode === 200 && body && body.indexOf("\uFFFD") < 0) return body;
+        if (res && res.statusCode === 200 && body && body.indexOf("\uFFFD") < 0) return asFixMojibake(body);
 
         // 3) Transcoding proxy: returns the same page already converted to UTF-8.
-        //    This is the route that survives runtimes that neither expose response
-        //    bytes nor decode CP1251 (the text would otherwise be all U+FFFD).
+        //    No Referer / Accept-Language here — the proxy reacts to those headers and
+        //    answers with entities, which the browser then decodes differently.
         const proxied = await this.client.get(AS_PROXY + url, {
-            "User-Agent": this.headers["User-Agent"],
             "Accept": "text/plain",
             "X-Return-Format": "html"
         });
         const proxiedBody = proxied && proxied.body ? String(proxied.body) : "";
-        if (proxied && proxied.statusCode === 200 && proxiedBody && proxiedBody.indexOf("\uFFFD") < 0) {
-            return proxiedBody;
+        const fixed = asFixMojibake(proxiedBody);
+        if (proxied && proxied.statusCode === 200 && fixed && fixed.indexOf("<") >= 0) {
+            return fixed;
         }
-        return body;
+        return asFixMojibake(body);
     }
 
     // Raw bytes of the page, or "" when the runtime cannot provide them.
