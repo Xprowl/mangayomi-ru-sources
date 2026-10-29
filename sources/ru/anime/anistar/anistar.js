@@ -8,11 +8,11 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.3.3",
+    "version": "0.4.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/anistar.js",
-    "notes": "AniStar (v31.astar.bz, DLE-движок, windows-1251). Каталог /anime/page/N/, жанры /filter/janrs/<urlencoded>/. Серии и плееры — из iframe /test/player2/videoas_p2p_new.php: HLS (адаптивный) + MP4 360/720 с CDN an-media.org (нужен Referer сайта). Встроенный поиск DLE по аниме не работает — поиск идёт по каталогу."
+    "notes": "AniStar (v31.astar.bz, DLE-движок, windows-1251). Каталог /anime/page/N/, жанры и 18+ теги /filter/janrs/<слово>/, поиск — штатный поиск сайта (запрос перекодируется в CP1251). Серии и плееры — из iframe /test/player2/videoas_p2p_new.php: HLS (адаптивный) + MP4 360/720 с CDN an-media.org (нужен Referer сайта). Фильтр жанра применяется к каталогу, текстовый запрос ищет по всему сайту."
 }];
 
 const AS_BASE = "https://v31.astar.bz";
@@ -53,6 +53,24 @@ function asCp1251Byte(ch) {
     i = AS_CP1251_HIGH.indexOf(ch);
     if (i >= 0 && i < 64) return 0xC0 + i;
     return -1;
+}
+
+// Percent-encoding in CP1251: the site's search expects the query in its own
+// charset, so a UTF-8 string from the keyboard has to be converted first.
+function asCp1251Percent(text) {
+    const s = String(text || "");
+    let out = "";
+    for (let i = 0; i < s.length; i++) {
+        const ch = s.charAt(i);
+        let b = asCp1251Byte(ch);
+        if (b < 0) b = 0x3F;
+        if (b < 0x80 && /[A-Za-z0-9\-_.~]/.test(ch)) {
+            out += ch;
+        } else {
+            out += "%" + (b < 16 ? "0" : "") + b.toString(16).toUpperCase();
+        }
+    }
+    return out;
 }
 
 function asDecode1251(bytes) {
@@ -374,9 +392,21 @@ class DefaultExtension extends MProvider {
     }
 
     async search(query, page, filters) {
-        // The DLE search module returns nothing for anime titles, so the catalog is
-        // filtered locally instead (page by page, until a match shows up).
-        const genreSlug = asFilterValue(filters && filters[0]) || asFilterValue(filters && filters[1]);
+        const genreSlug = asFilterValue(filters && filters[0]);
+        const q = String(query || "").trim();
+
+        // Real site search: DLE expects the query in CP1251 and paginates with
+        // search_start / result_from. The results live inside #dle-content — the rest
+        // of the page carries unrelated news blocks.
+        if (q) {
+            const url = this.searchUrl(q, page);
+            const body = await this.fetch1251(url);
+            if (!body) return { list: [], hasNextPage: false };
+            const parsed = this.isMarkdown(body)
+                ? this.parseMarkdownCatalog(this.mdText(body))
+                : this.parseSearch(body);
+            return parsed;
+        }
 
         const base = genreSlug
             ? `${asBase(this.source)}/filter/janrs/${encodeURIComponent(genreSlug)}`
@@ -385,13 +415,37 @@ class DefaultExtension extends MProvider {
 
         const body = await this.fetch1251(url);
         if (!body) return { list: [], hasNextPage: false };
-        const parsed = this.isMarkdown(body) ? this.parseMarkdownCatalog(this.mdText(body)) : this.parseCatalog(body);
+        return this.isMarkdown(body) ? this.parseMarkdownCatalog(this.mdText(body)) : this.parseCatalog(body);
+    }
 
-        if (!query || !query.trim()) return parsed;
+    searchUrl(q, page) {
+        const url = `${asBase(this.source)}/index.php?do=search&subaction=search&story=${asCp1251Percent(q)}`;
+        if (!page || page <= 1) return url;
+        return `${url}&search_start=${page}&result_from=${(page - 1) * 10 + 1}`;
+    }
 
-        const q = query.trim().toLowerCase();
-        const matched = parsed.list.filter(m => m.name.toLowerCase().indexOf(q) >= 0);
-        return { list: matched, hasNextPage: parsed.hasNextPage };
+    // Search results: only the cards inside #dle-content belong to the query.
+    parseSearch(htmlBody) {
+        const doc = new Document(htmlBody);
+        const content = doc.selectFirst("#dle-content");
+        const cards = content ? content.select("div.news") : doc.select("div.news");
+        if (!cards.length) return this.parseCatalog(htmlBody);
+
+        const list = [];
+        const seen = {};
+        for (const card of cards) {
+            const titleA = card.selectFirst(".title_left a");
+            if (!titleA) continue;
+            const href = titleA.attr("href") || "";
+            if (!/\/\d+-[^/]+\.html$/.test(href) || seen[href]) continue;
+            seen[href] = true;
+            const name = this.tidyName(titleA.attr("title") || titleA.text || "", href);
+            if (!name) continue;
+            const img = card.selectFirst("img[itemprop='image']") || card.selectFirst("img.main-img");
+            const imageUrl = img ? this.abs(img.attr("src") || img.attr("data-src") || "") : "";
+            list.push({ name: name, imageUrl: imageUrl, link: this.abs(href) });
+        }
+        return { list: list, hasNextPage: list.length >= AS_PAGE_SIZE };
     }
 
     async getDetail(url) {
@@ -516,6 +570,8 @@ class DefaultExtension extends MProvider {
     getFilterList() {
         // Values are the words the site itself uses: Cyrillic genres are taken from
         // /filter/janrs/<word>/, the adult tags keep the site's English spelling.
+        // Generic English tags (Action, Romance, Fantasy…) are left out on purpose —
+        // they exist in the adult section too and otherwise return ordinary anime.
         const genres = [
             "Боевик", "Боевые искусства", "Военное", "Вестерн", "Гарем", "Гурман",
             "Демоны", "Детектив", "Дзёсэй", "Драма", "Игры", "Исторический", "Китай",
@@ -527,34 +583,26 @@ class DefaultExtension extends MProvider {
         ];
         const adult = [
             "Ahegao", "All sex", "Anal sex", "BDSM", "Big tits", "Blackmail", "Bondage",
-            "Cheating", "Cosplay", "Creampie", "Dark skin", "Drugs", "Elf",
-            "Emotionless sex", "Erotic", "Futanari", "Gangbang", "Gigantic Breasts",
-            "Group", "Group sex", "Gyaru", "Harem", "Horror Oral", "Incest", "Lactation",
-            "Maid", "Milf", "Milk", "Mind Break", "Mind Control", "Monster girl",
-            "Netorare", "NTR", "Nun", "Nurse", "Oral", "Oral sex", "Oral sex Gyaru",
-            "Paizuri", "Pregnant", "Prostitution", "Rape", "School uniform",
-            "Schoolgirl uniform", "Slavery", "Slut", "Small tits", "Softcore", "Student",
-            "Succubus", "Tentacles", "Toys", "Torture", "Trap", "Twins", "Virgin", "Yuri"
+            "Cheating", "Cosplay", "Creampie", "Dark skin", "Emotionless sex", "Erotic",
+            "Futanari", "Gangbang", "Gigantic Breasts", "Group", "Group sex", "Gyaru",
+            "Horror Oral", "Incest", "Lactation", "Maid", "Milf", "Milk", "Mind Break",
+            "Mind Control", "Monster girl", "Netorare", "NTR", "Nun", "Nurse", "Oral",
+            "Oral sex", "Oral sex Gyaru", "Paizuri", "Pregnant", "Prostitution", "Rape",
+            "School uniform", "Schoolgirl uniform", "Slavery", "Slut", "Small tits",
+            "Softcore", "Student", "Succubus", "Tentacles", "Toys", "Torture", "Trap",
+            "Twins", "Virgin", "Yuri"
         ];
-        const options = (list) => [["— Любой —", ""]].concat(list.map(x => [x, x]))
-            .map(x => ({ type_name: "SelectOption", name: x[0], value: x[1] }));
+        const values = [["— Любой —", ""]];
+        for (const g of genres) values.push([g, g]);
+        for (const t of adult) values.push(["🔞 " + t, t]);
 
-        return [
-            {
-                type_name: "SelectFilter",
-                type: "genre",
-                name: "Жанр",
-                state: 0,
-                values: options(genres)
-            },
-            {
-                type_name: "SelectFilter",
-                type: "genre",
-                name: "Теги 18+",
-                state: 0,
-                values: options(adult)
-            }
-        ];
+        return [{
+            type_name: "SelectFilter",
+            type: "genre",
+            name: "Жанр / тег",
+            state: 0,
+            values: values.map(x => ({ type_name: "SelectOption", name: x[0], value: x[1] }))
+        }];
     }
 
     getSourcePreferences() { return []; }
