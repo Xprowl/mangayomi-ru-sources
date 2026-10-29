@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.4.0",
+    "version": "0.4.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animejoy.js",
@@ -479,7 +479,7 @@ class DefaultExtension extends MProvider {
             const parts = row.id.split("_").filter(x => x !== "");
             // Nested rows end with their own episode index; the middle part is the
             // folder (season) index that both the rows and the player tabs carry.
-            const folder = parts.length >= 4 ? parts.slice(2, parts.length - 1).join("_") : "";
+            const folder = parts.length >= 3 ? parts.slice(2, parts.length - 1).join("_") : "";
             const inSeason = folder;
 
             // "TV"/"Фильм" rows are whole-season links; each gets its own entry.
@@ -504,74 +504,83 @@ class DefaultExtension extends MProvider {
             g.lastLabel = player;
         }
 
+        // Episode rows are split across sub-tabs ("1101-1110", "1111-1120") and
+        // every row's data-id ends with the sub-tab index, not the episode itself.
+        // The sub-tab label is what tells episodes apart, and directories like
+        // "Спэшл" or "Фильм" only make sense with their sub-tab in the name.
         const episodes = [];
         const multiGroup = pl.groups.length > 1;
-        // Seasons exist only when a group has more than one season folder.
-        const seasonFolders = {};
-        for (const k of Object.keys(folderSeason)) {
-            const g = k.split("_").slice(0, 2).join("_");
-            seasonFolders[g] = (seasonFolders[g] || 0) + 1;
+        // Groups that behave like providers (one row per episode, same labels) repeat
+        // each other: only those get the player name in the episode title.
+        const gPlayerTagMap = {};
+        for (const g of groups) {
+            const lbl = g.items.reduce((a, it) => { a[this.normLabel(it.label)] = true; return a; }, {});
+            gPlayerTagMap[g.id] = Object.keys(lbl).length;
         }
+        const seenEp = {};
         for (const g of groups) {
             if (!g.items.length) continue;
             const gParts = g.id.split("_");
-            // Folder groups (one per season/range) share the player tab; it only
-            // counts as a multi-player group when the folder holds several labels.
-            const gLabels = {};
-            g.items.forEach(it => { gLabels[it.label] = true; });
-            const gMulti = Object.keys(gLabels).length > 1 || g.items.length > 4;
-            const gItemsCount = g.items.length;
-
+            // Range sub-tab ("1101-1110") of this folder, "" when the title is not split.
+            const gSeasonTab = gParts.length >= 3 ? (pl.players.find(x => x.id === g.id) || {}).label || "" : "";
             const gInfo = pl.groups.find(x => x.id === (gParts.length >= 3 ? gParts.slice(0, 2).join("_") : g.id));
-            const gPlayer = gParts.length >= 3 ? this.playerGroupLabel(gParts.slice(0, 2).join("_"), gParts[2], pl) : "";
+            const multiPlayer = Object.keys(g.items.reduce((a, it) => { a[it.player] = true; return a; }, {})).length > 1;
+            const groupTag = gInfo && gInfo.label && !gPlayerIsGroup(gInfo.label, g, pl) ? " · " + gInfo.label : "";
 
-            // 1) Whole-season links ("TV", "Фильм") — one entry each.
             const whole = g.items.filter(it => it.whole).sort((a, b) => a.rank - b.rank);
             for (const it of whole) {
-                const seasonTag = it.folder ? " · " + it.folder : "";
-                const wholeName = multiGroup && it.player !== it.label ? it.label + " · " + it.player + seasonTag : it.label + seasonTag;
+                const tag = it.season ? " · " + it.season : groupTag;
                 episodes.push({
-                    name: wholeName,
+                    name: it.label + tag,
                     url: it.player + "||" + it.file,
                     dateUpload: Date.now().toString(),
                     scanlator: null
                 });
             }
 
-            // 2) Episode rows — grouped per season (when nested) and per label.
             const numbered = g.items.filter(it => !it.whole);
             if (!numbered.length) continue;
             const byLabel = {};
-            const labels = [];
+            const order = [];
             for (const it of numbered) {
-                const canon = this.normLabel(it.label);
-                const key = it.season !== "" && multiGroup ? "s" + it.season + "|" + canon : canon;
+                const key = this.normLabel(it.label) + "|" + it.season;
                 if (!byLabel[key]) {
                     byLabel[key] = [];
-                    labels.push(key);
+                    order.push(key);
                 }
                 byLabel[key].push(it);
             }
-            labels.sort((a, b) => this.rowOrder(a.split("|").pop(), 0) - this.rowOrder(b.split("|").pop(), 0));
-            for (const key of labels) {
+            for (const key of order) {
                 const items = byLabel[key].slice().sort((a, b) => a.rank - b.rank);
-                const rawLabel = key.split("|").pop();
-                const m = String(rawLabel).match(/(\d+)/);
+                const label = items[0].label;
+                const m = String(label).match(/(\d+)/);
                 const num = m ? parseInt(m[1], 10) : 0;
-                // Suffix tells the user which translation and which part of the
-                // series the player tab (e.g. "1101-1110") belongs to.
-                const partsName = [];
-                if (gPlayer && (gMulti || gItemsCount > 2)) partsName.push(gPlayer);
-                if (gInfo && gInfo.label) partsName.push(gInfo.label);
-                else if (items[0].season !== "") partsName.push(items[0].season);
-                const seasonTag = partsName.length ? " · " + partsName.join(" · ") : "";
-                episodes.push({
-                    name: (num > 0 ? "Серия " + num : rawLabel) + seasonTag,
-                    url: items.map(r => `${r.player}||${r.file}`).join("\n"),
-                    dateUpload: Date.now().toString(),
-                    scanlator: null
-                });
+                let name;
+                if (num > 0) name = "Серия " + num;
+                else if (items[0].season) name = label + " · " + items[0].season;
+                else name = label;
+                // In a players-only playlist the group tab IS the player, so it is
+                // the only thing telling two "Серия 1" rows apart.
+                // Translation ("Ziggy Team 1180") and, for split titles, the range tab
+                // ("1101-1110") keep same-numbered rows apart. A players-only playlist
+                // gets the player name instead of the translation.
+                if (groupTag) name += groupTag;
+                const isPlayerList = !multiPlayer && (gPlayerTagMap[g.id] || 0) > 1;
+                if (isPlayerList && !groupTag) name += " · " + gInfo.label;
+                if (gSeasonTab) name += " · " + gSeasonTab;
+                // The same episode must not be listed twice (same name + same players).
+                const url = items.map(r => r.player + "||" + r.file).join("\n");
+                const dedupeKey = g.id + "|" + name + "|" + url;
+                if (seenEp[dedupeKey]) continue;
+                seenEp[dedupeKey] = true;
+                episodes.push({ name: name, url: url, dateUpload: Date.now().toString(), scanlator: null });
             }
+        }
+
+        // Cheap helper: group label equals a player tab ("AL" for the whole title).
+        function gPlayerIsGroup(label, g, pl) {
+            const names = (pl.players || []).filter(p => p.id.split("_").length === 3 && p.id.split("_").slice(0, 2).join("_") === g.id.split("_").slice(0, 2).join("_")).map(p => p.label);
+            return names.length >= 4 && names.indexOf(label) >= 0;
         }
 
         const clean = episodes.map(e => ({ name: e.name, url: e.url, dateUpload: e.dateUpload, scanlator: null }));
