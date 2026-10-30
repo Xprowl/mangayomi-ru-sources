@@ -90,8 +90,6 @@ function aoFilterValue(filters, index) {
 // gets a normal "озвучка" switch.
 const AO_PREF_DUB = "animeon_dub";
 const AO_PREF_FILL = "animeon_dub_fill";
-const AO_PREF_PROXY = "animeon_proxy";
-
 function aoPref(key, fallback) {
     try {
         if (typeof SharedPreferences === "undefined") return fallback;
@@ -347,34 +345,11 @@ class DefaultExtension extends MProvider {
     // Optional free proxy (a Cloudflare Worker from cloudflare/kodik-proxy-worker.js):
     // Kodik's CDN is behind DDoS-Guard and geo-restricted, the worker fetches the stream
     // once from outside and serves it without the checks, so playback starts at once.
-    proxyBase() {
-        const raw = String(aoPref(AO_PREF_PROXY, '') || '').trim().replace(/\/+$/, '');
-        if (!raw) return '';
-        return /^https?:\/\//i.test(raw) ? raw : 'https://' + raw;
-    }
-
+    // The shared kodik_proxy helper reads the same preference (animeon_proxy).
     rewriteProxy(videos) {
-        const base = this.proxyBase();
-        if (!base) return videos;
-        const enc = (u) => base + '/?u=' + encodeURIComponent(u);
-        const out = [];
-        for (const v of videos) {
-            const url = String(v.url || '');
-            if (!/^https?:\/\//i.test(url)) { out.push(v); continue; }
-            // Everything goes through the worker: the playlist, and then its segments
-            // (the worker rewrites those itself).
-            out.push({
-                url: enc(url),
-                originalUrl: url,
-                quality: v.quality,
-                headers: { 'User-Agent': AO_UA, 'Referer': 'https://kodikplayer.com/' }
-            });
-        }
-        return out;
+        return kodikProxyVideos(videos);
     }
 
-    // All voice-overs of the episode on screen, for the 'Media' entry the player opens
-    // while watching. Called right after getVideoList, so the UI is already playable.
     async voiceList(url) {
         const raw = String(url || '').trim();
         if (!raw) return [];
@@ -518,16 +493,7 @@ class DefaultExtension extends MProvider {
     // is left here is filling the episode gaps of the main voice-over.
     getSourcePreferences() {
         return [
-            {
-                key: AO_PREF_PROXY,
-                editTextPreference: {
-                    title: "Прокси для видео (необязательно)",
-                    summary: "Адрес своего бесплатного прокси (Cloudflare Worker), например https://animeon-video.имя.workers.dev — тогда поток идёт через него. Пусто — видео напрямую с Kodik.",
-                    value: "",
-                    dialogTitle: "Адрес прокси",
-                    dialogMessage: "https://animeon-video.имя.workers.dev"
-                }
-            },
+            kodikProxyPreference(),
             {
                 key: AO_PREF_FILL,
                 listPreference: {

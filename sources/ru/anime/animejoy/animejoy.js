@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.4.1",
+    "version": "0.5.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animejoy.js",
@@ -653,7 +653,7 @@ class DefaultExtension extends MProvider {
             if (fileUrl.indexOf("kodik") >= 0) {
                 let kv = [];
                 try { kv = await kodikExtract(this.client, fileUrl, this._base || ajBase(this.source), "Kodik"); } catch (e) { kv = []; }
-                for (const v of kv) push(v.url, v.quality, v.headers);
+                for (const v of kodikProxyVideos(kv)) push(v.url, v.quality, v.headers);
                 // Kodik is often geo-blocked: keep its page as a last resort.
                 push(this.absOrProto(fileUrl), "Kodik · iframe", streamHeaders);
                 continue;
@@ -706,7 +706,7 @@ class DefaultExtension extends MProvider {
             if (file.indexOf("kodik") >= 0) {
                 let kv = [];
                 try { kv = await kodikExtract(this.client, file, this._base || ajBase(this.source), "Kodik"); } catch (e) { kv = []; }
-                for (const v of kv) push(v.url, v.quality, v.headers);
+                for (const v of kodikProxyVideos(kv)) push(v.url, v.quality, v.headers);
                 push(this.absOrProto(file), "Kodik · iframe", streamHeaders);
                 continue;
             }
@@ -741,5 +741,5 @@ class DefaultExtension extends MProvider {
         }];
     }
 
-    getSourcePreferences() { return []; }
+    getSourcePreferences() { return [kodikProxyPreference()]; }
 }

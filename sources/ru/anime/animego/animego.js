@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.7.0",
+    "version": "0.8.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animego.js",
@@ -509,7 +509,7 @@ class DefaultExtension extends MProvider {
 
             if (prov === "kodik" || src.indexOf("kodikplayer") >= 0) {
                 const kodikVids = await kodikExtract(this.client, src, agBase(this.source), `AnimeGO · ${translation || "Kodik"}`);
-                for (const v of kodikVids) videos.push(v);
+                for (const v of kodikProxyVideos(kodikVids)) videos.push(v);
                 continue;
             }
 
@@ -579,5 +579,5 @@ class DefaultExtension extends MProvider {
             }
         ];
     }
-    getSourcePreferences() { return []; }
+    getSourcePreferences() { return [kodikProxyPreference()]; }
 }
