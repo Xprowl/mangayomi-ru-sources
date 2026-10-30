@@ -43,6 +43,8 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 **Новеллы (5):** Jaomix · RanobeHub · RanobeLib · Ранобэ.рф · Tl.Rulate
 
+> **v0.9.5**: **AnimeOn 0.1.1** — если Kodik удалил конкретную серию (iframe отвечает 500), `getVideoList` пробует ту же серию ещё в двух озвучках, прежде чем вернуть пусто. JSON тайтла кэшируется на 10 минут, так что подбор не стоит лишнего мегабайта трафика.
+>
 > **v0.9.4**: добавлен **AnimeOn** (animeon.cc, аниме). Сайт на Next.js, но всё нужное отдаёт его собственный JSON API, поэтому HTML-парсер не нужен: каталог/поиск `/api/anime?search=&genre=&kind=&status=&year_from=&year_to=&sort=&page=`, тайтл `/api/anime/<slug>`. Серии и озвучки лежат прямо в JSON тайтла (`translations → episodes → link`), ссылки ведут на Kodik — видео берётся общим `kodik_extractor` (HLS 240–720, referer animeon.cc, iframe как fallback). Фильтры: жанр (86), тип, год, статус, сортировка.
 >
 > **v0.9.3**: добавлен **AniStar** (31.astar.bz, аниме). DLE-движок на windows-1251 — текст читается через XHR с явным декодированием. Каталог /anime/page/N/, «Новинки» /new/, жанры /filter/janrs/<urlencoded>/. Серии и плееры берутся из /test/player2/videoas*.php: HLS (HQ/SD) с n-media.org, нужен Referer сайта. Встроенный поиск DLE по аниме пустой, поэтому поиск идёт по каталогу (по страницам).

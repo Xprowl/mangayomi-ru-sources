@@ -10,16 +10,17 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.1.0",
+    "version": "0.1.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
-    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes and voice-overs are in the title JSON (translations -> episodes -> Kodik seria link), so no HTML parsing is needed. Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. Titles without any translation (announcements) have no episodes."
+    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes and voice-overs are in the title JSON (translations -> episodes -> Kodik seria link), so no HTML parsing is needed. Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. If Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
 }];
 
 const AO_BASE = "https://animeon.cc";
 const AO_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const AO_PAGE_SIZE = 20;
+const AO_CACHE_TTL = 10 * 60 * 1000;
 
 const AO_GENRES = [
     "Экшен", "Комедия", "Фэнтези", "Приключения", "Фантастика", "Драма", "Романтика",
@@ -105,6 +106,19 @@ class DefaultExtension extends MProvider {
         try { return JSON.parse(res.body); } catch (e) { return null; }
     }
 
+    // Title JSON is up to ~1 MB (One Piece), and the episode fallback below may need
+    // it again right after getDetail — keep it for a few minutes.
+    async detailData(slug) {
+        if (!slug) return null;
+        this._detailCache = this._detailCache || {};
+        const hit = this._detailCache[slug];
+        if (hit && Date.now() - hit.at < AO_CACHE_TTL) return hit.data;
+        const data = await this.api("/api/anime/" + encodeURIComponent(slug));
+        if (!data || !data.title) return null;
+        this._detailCache[slug] = { at: Date.now(), data: data };
+        return data;
+    }
+
     toList(json, page) {
         const base = aoBase(this.source);
         const items = (json && json.items) || [];
@@ -159,8 +173,8 @@ class DefaultExtension extends MProvider {
         const empty = { name: "", imageUrl: "", description: "", genre: [], status: 5, episodes: [] };
         const slug = aoSlug(url);
         if (!slug) return empty;
-        const data = await this.api("/api/anime/" + encodeURIComponent(slug));
-        if (!data || !data.title) return empty;
+        const data = await this.detailData(slug);
+        if (!data) return empty;
 
         const base = aoBase(this.source);
         const md = data.material_data || {};
@@ -195,6 +209,7 @@ class DefaultExtension extends MProvider {
         const episodes = [];
         const seen = {};
         const translations = data.translations || {};
+        const slug = data.anime_url || "";
 
         const tracks = Object.keys(translations).map(name => {
             const t = translations[name] || {};
@@ -228,7 +243,9 @@ class DefaultExtension extends MProvider {
                 seen[dedupe] = true;
                 episodes.push({
                     name: name,
-                    url: link + "||" + tag,
+                    // link || voice-over || slug || episode key — the trailing parts let
+                    // getVideoList retry the same episode in another voice-over.
+                    url: link + "||" + tag + "||" + slug + "||" + item.key,
                     dateUpload: Date.now().toString(),
                     scanlator: null
                 });
@@ -240,14 +257,55 @@ class DefaultExtension extends MProvider {
     async getVideoList(url) {
         const raw = String(url || "").trim();
         if (!raw) return [];
-        const sep = raw.indexOf("||");
-        let link = sep >= 0 ? raw.slice(0, sep) : raw;
-        const label = sep >= 0 ? raw.slice(sep + 2) : "AnimeOn";
+        const parts = raw.split("||");
+        let link = parts[0] || "";
+        const label = parts[1] || "AnimeOn";
+        const slug = parts[2] || "";
+        const epKey = parts[3] || "";
         if (link.startsWith("//")) link = "https:" + link;
         if (!/^https?:\/\//i.test(link)) return [];
+
         // Kodik resolves to HLS 240–720 with the site's referer; the iframe is appended
         // as the last option by the shared extractor.
-        return await kodikExtract(this.client, link, aoBase(this.source), label);
+        const videos = await kodikExtract(this.client, link, aoBase(this.source), label);
+        if (this.hasHls(videos)) return videos;
+
+        // Kodik drops individual episodes over time (the iframe answers 500 and the
+        // extractor returns nothing). The same episode normally still exists in another
+        // voice-over, so try a couple of them before reporting "no video".
+        for (const alt of await this.altLinks(slug, epKey, link)) {
+            const tried = await kodikExtract(this.client, alt.link, aoBase(this.source), alt.tag);
+            if (this.hasHls(tried)) return tried;
+        }
+        return videos;
+    }
+
+    hasHls(videos) {
+        return (videos || []).some(v => / \d+p$/.test(String(v.quality || "")));
+    }
+
+    // Other voice-overs that have the same episode key, most watched first.
+    async altLinks(slug, epKey, usedLink) {
+        if (!slug || !epKey) return [];
+        const data = await this.detailData(slug);
+        if (!data) return [];
+        const translations = data.translations || {};
+        const rows = [];
+        for (const name of Object.keys(translations)) {
+            const t = translations[name] || {};
+            const entry = (t.episodes || {})[epKey];
+            let link = entry && entry.link ? String(entry.link) : "";
+            if (!link) continue;
+            if (link.startsWith("//")) link = "https:" + link;
+            if (link === usedLink) continue;
+            rows.push({
+                link: link,
+                tag: name + (t.type === "subtitles" ? " · субтитры" : ""),
+                viewers: Number(t.viewers || 0)
+            });
+        }
+        rows.sort((a, b) => b.viewers - a.viewers);
+        return rows.slice(0, 2);
     }
 
     getFilterList() {
