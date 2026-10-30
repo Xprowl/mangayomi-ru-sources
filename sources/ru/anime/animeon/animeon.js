@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.2.0",
+    "version": "0.3.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
@@ -83,21 +83,12 @@ function aoFilterValue(filters, index) {
 }
 
 // --- voice-over (озвучка) selection -------------------------------------------
-// Stored in Mangayomi's app-wide SharedPreferences, so the keys are prefixed.
+// Kodik hides the voice-over list behind its Premium flag: the /ftor response only
+// contains links for the current translation. Drop that flag (and the quality one)
+// and it returns links for EVERY translation of the episode, which is how the player
+// gets a normal "озвучка" switch.
 const AO_PREF_DUB = "animeon_dub";
-const AO_PREF_DUB_CUSTOM = "animeon_dub_custom";
 const AO_PREF_FILL = "animeon_dub_fill";
-
-// The site knows ~1000 studio names, but these cover the vast majority of titles;
-// anything else can be typed into the "своя озвучка" field.
-const AO_DUBS = [
-    "AniDUB", "AniLibria_TV", "AniStar", "AnimeVost", "Animedia", "Studio Band",
-    "Persona99", "Dream Cast", "AniBaza", "AniFilm", "SHIZA Project", "Субтитры",
-    "Amazing Dubbing", "Crunchyroll", "Crunchyroll_Subtitles", "AniLiberty",
-    "JAM", "OnWave", "FumoDub", "LE-Production", "ТО Дубляжная", "AniMaunt",
-    "2x2", "AniDub Online", "Kitsune Studio", "Freedub Studio", "AniVolume",
-    "AnimeVibe", "Youkai Studio", "TVShows", "New Horizons Studio", "GoLTFilm"
-];
 
 function aoPref(key, fallback) {
     try {
@@ -109,24 +100,8 @@ function aoPref(key, fallback) {
     }
 }
 
-// An explicit "своя озвучка" wins over the drop-down; "" means "all voice-overs".
-function aoDubPref() {
-    const custom = String(aoPref(AO_PREF_DUB_CUSTOM, "") || "").trim();
-    if (custom) return custom;
-    return String(aoPref(AO_PREF_DUB, "") || "").trim();
-}
-
 function aoTrackTag(track) {
     return track.name + (track.type === "subtitles" ? " · субтитры" : "");
-}
-
-// Exact name first, then a substring match so "AniLib" finds "AniLibria_TV".
-function aoMatchTrack(tracks, dub) {
-    const needle = String(dub || "").trim().toLowerCase();
-    if (!needle) return null;
-    return tracks.find(t => t.name.toLowerCase() === needle)
-        || tracks.find(t => t.name.toLowerCase().indexOf(needle) >= 0)
-        || null;
 }
 
 class DefaultExtension extends MProvider {
@@ -270,19 +245,13 @@ class DefaultExtension extends MProvider {
 
         tracks.sort((a, b) => b.viewers - a.viewers || a.name.localeCompare(b.name));
 
-        const dub = aoDubPref();
-        let chosen = dub ? aoMatchTrack(tracks, dub) : null;
-        const fill = String(aoPref(AO_PREF_FILL, "0")) === "1";
+        // The voice-over does not matter for the episode list: getVideoList asks Kodik
+        // for every translation of the episode anyway, so one row per episode is enough.
+        const fill = String(aoPref(AO_PREF_FILL, '1')) === '1';
+        const main = tracks[0];
 
         const rows = [];
         const covered = {};
-
-        // Selected dub is missing from this title entirely → keep the full grouped list
-        // instead of an empty episode screen.
-        if (chosen) {
-            const hasLinks = t => Object.keys(t.episodes).some(k => t.episodes[k] && t.episodes[k].link);
-            if (!hasLinks(chosen)) chosen = null;
-        }
 
         const addTrack = (t, opts) => {
             opts = opts || {};
@@ -295,41 +264,31 @@ class DefaultExtension extends MProvider {
             for (const item of keys) {
                 if (opts.skipCovered && covered[item.key]) continue;
                 const entry = t.episodes[item.key];
-                let link = entry && entry.link ? String(entry.link) : "";
+                let link = entry && entry.link ? String(entry.link) : '';
                 if (!link) continue;
-                if (link.startsWith("//")) link = "https:" + link;
-                const label = item.num > 0 ? "Серия " + item.num : item.key;
-                const name = opts.plain ? label : label + " · " + tag;
-                const dedupe = name + "|" + link;
-                if (seen[dedupe]) continue;
-                seen[dedupe] = true;
+                if (link.startsWith('//')) link = 'https:' + link;
+                const label = item.num > 0 ? 'Серия ' + item.num : item.key;
                 covered[item.key] = true;
                 rows.push({
                     num: item.num,
-                    views: t.viewers,
-                    name: name,
+                    name: opts.fill ? label + ' · ' + tag : label,
                     // link || voice-over || slug || episode key — the trailing parts let
                     // getVideoList retry the same episode in another voice-over.
-                    url: link + "||" + tag + "||" + slug + "||" + item.key
+                    url: link + '||' + tag + '||' + slug + '||' + item.key
                 });
             }
         };
 
-        if (chosen) {
-            // A voice-over is selected in the source settings: only its episodes, and
-            // they are just "Серия N" (One Piece has 11 dubs, 4031 rows otherwise).
-            addTrack(chosen, { plain: true });
-            if (fill) {
-                for (const t of tracks) {
-                    if (t !== chosen) addTrack(t, { skipCovered: true });
-                }
+        addTrack(main, {});
+        // Fill the episode gaps of the main voice-over from the others (subtitle-only
+        // releases often miss the last raw episodes). Rows then say who voices them.
+        if (fill) {
+            for (const t of tracks) {
+                if (t !== main) addTrack(t, { skipCovered: true, fill: true });
             }
-        } else {
-            // All voice-overs, grouped by episode number: to change the dub of one
-            // episode just pick a neighbouring row, the most watched dub goes first.
-            for (const t of tracks) addTrack(t, {});
-            rows.sort((a, b) => (a.num || 1e9) - (b.num || 1e9) || b.views - a.views);
         }
+
+        rows.sort((a, b) => (a.num || 1e9) - (b.num || 1e9));
 
         const stamp = Date.now().toString();
         return rows.map(r => ({ name: r.name, url: r.url, dateUpload: stamp, scanlator: null }));
@@ -348,7 +307,7 @@ class DefaultExtension extends MProvider {
 
         // Kodik resolves to HLS 240–720 with the site's referer; the iframe is appended
         // as the last option by the shared extractor.
-        const videos = await kodikExtract(this.client, link, aoBase(this.source), label);
+        const videos = await kodikExtract(this.client, link, aoBase(this.source), label, { allTranslations: true });
         if (this.hasHls(videos)) return videos;
 
         // Kodik drops individual episodes over time (the iframe answers 500 and the
@@ -429,41 +388,15 @@ class DefaultExtension extends MProvider {
         ];
     }
 
-    // "Озвучка" lives in source preferences (they stay with the source, not with the
-    // search form), which is what users expect when they want to change the dub.
+    // Kodik already offers every voice-over of the episode in the player, so all that
+    // is left here is filling the episode gaps of the main voice-over.
     getSourcePreferences() {
-        const dubEntries = ["Все озвучки (по сериям)"].concat(AO_DUBS);
-        const dubValues = [""].concat(AO_DUBS);
-        const dub = aoDubPref();
-        const inList = dubValues.indexOf(dub);
-        const defaultEntry = inList >= 0 ? inList : dub ? dubEntries.length : 0;
-
         return [
-            {
-                key: AO_PREF_DUB,
-                listPreference: {
-                    title: "Озвучка",
-                    summary: "Список серий содержит только выбранную озвучку. «Все озвучки» группирует ряды по номеру серии — чтобы сменить озвучку одной серии, выбери соседний ряд. Если озвучки нет в списке — впиши её название в поле ниже.",
-                    valueIndex: defaultEntry,
-                    entries: dubEntries,
-                    entryValues: dubValues
-                }
-            },
-            {
-                key: AO_PREF_DUB_CUSTOM,
-                editTextPreference: {
-                    title: "Своя озвучка (точное имя)",
-                    summary: "Имеет приоритет над списком. Название как на сайте, например «AniRise» или «SovetRomantica_Subtitles». Подходит и часть имени: «AniLib» найдёт «AniLibria_TV». Оставь пустым, чтобы использовать список выше.",
-                    value: "",
-                    dialogTitle: "Название озвучки",
-                    dialogMessage: "Например: AniRise, Onibaku, AniStar & VEEP"
-                }
-            },
             {
                 key: AO_PREF_FILL,
                 listPreference: {
                     title: "Добивать пробелы другой озвучкой",
-                    summary: "Если в выбранной озвучке нет некоторых серий — подмешать их из других озвучек (с пометкой студии в названии).",
+                    summary: "Если у основной озвучки нет некоторых серий — показать их из других озвучек (с пометкой студии в названии).",
                     valueIndex: 1,
                     entries: ["Нет", "Да"],
                     entryValues: ["0", "1"]
