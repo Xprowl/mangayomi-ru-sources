@@ -37,12 +37,14 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 ### ✅ Полностью работают (отдают реальный контент):
 
-**Аниме (11):** AniLibria · Animedia · AnimeGO · AnimeJoy · AniLib · Animeshka · **Animesss** · AnimeVost · Anixart · **Shiruho** · **YummyAnime**
+**Аниме (12):** AniLibria · Animedia · AnimeGO · AnimeJoy · **AnimeOn** · AniLib · Animeshka · **Animesss** · AnimeVost · Anixart · **Shiruho** · **YummyAnime**
 
 **Манга (8):** Acomics · Desu.Me · MangaBuff · ReadManga · Remanga · SelfManga · **Senkognito** ⭐ · **Senkuro**
 
 **Новеллы (5):** Jaomix · RanobeHub · RanobeLib · Ранобэ.рф · Tl.Rulate
 
+> **v0.9.4**: добавлен **AnimeOn** (animeon.cc, аниме). Сайт на Next.js, но всё нужное отдаёт его собственный JSON API, поэтому HTML-парсер не нужен: каталог/поиск `/api/anime?search=&genre=&kind=&status=&year_from=&year_to=&sort=&page=`, тайтл `/api/anime/<slug>`. Серии и озвучки лежат прямо в JSON тайтла (`translations → episodes → link`), ссылки ведут на Kodik — видео берётся общим `kodik_extractor` (HLS 240–720, referer animeon.cc, iframe как fallback). Фильтры: жанр (86), тип, год, статус, сортировка.
+>
 > **v0.9.3**: добавлен **AniStar** (31.astar.bz, аниме). DLE-движок на windows-1251 — текст читается через XHR с явным декодированием. Каталог /anime/page/N/, «Новинки» /new/, жанры /filter/janrs/<urlencoded>/. Серии и плееры берутся из /test/player2/videoas*.php: HLS (HQ/SD) с n-media.org, нужен Referer сайта. Встроенный поиск DLE по аниме пустой, поэтому поиск идёт по каталогу (по страницам).
 >
 > **v0.9.2**: добавлен **SlashLib** (манга, яой/юри). Семейство Lib, `site_id=2`, API `api.cdnlibs.org`. В каталоге, деталях, главах и страницах проверено на живых данных: 60 тайтлов на страницу, 123 главы, 45 страниц главы (WebP/PNG с `img2/img3.hentaicdn.org`). Жанров — 56 (включая Яой/Юри): `/api/genres` у site 2 отдаёт 403 без логина, поэтому список берётся из `/api/constants?fields[]=genres` и отфильтрован по `site_ids`. Заодно в Lib-базе появился фолбэк `libApiBase()`/`libWebBase()` — если Host-приложение отдаст пустой `apiUrl`/`baseUrl`, запросы всё равно уйдут на абсолютный URL (иначе rhttp падает с `relative URL without a base`).
