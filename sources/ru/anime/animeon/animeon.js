@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.3.1",
+    "version": "0.3.2",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
@@ -318,7 +318,6 @@ class DefaultExtension extends MProvider {
             this._videoCache[link] = { at: Date.now(), videos: videos };
             return this.reorder(videos, label);
         }
-        if (this.hasHls(videos)) return videos;
 
         // Kodik drops individual episodes over time (the iframe answers 500 and the
         // extractor returns nothing). The same episode normally still exists in another
@@ -328,6 +327,25 @@ class DefaultExtension extends MProvider {
             if (this.hasHls(tried)) return tried;
         }
         return videos;
+    }
+
+    // Mangayomi calls this for autoplay "next episode": only the voice-over that was being
+    // watched is resolved (one voice-over instead of all of them), which keeps the
+    // transition between episodes as fast as a normal first play.
+    async nextEpisodeSources(prev, allPrev) {
+        const tag = (q) => String(q || "").replace(/ \d+p$/, "");
+        const wanted = tag(prev && prev.quality);
+        const cached = (allPrev || []).filter(v => tag(v.quality) === wanted).sort(
+            (a, b) => this.qualityNum(b.quality) - this.qualityNum(a.quality)
+        );
+        if (cached.length) return this.reorder(cached, wanted);
+        const url = String((prev && prev.originalUrl) || "").trim();
+        if (!/^https?:\/\//i.test(url)) return [];
+        return await kodikExtract(this.client, url, aoBase(this.source), wanted || "AnimeOn", {});
+    }
+
+    qualityNum(quality) {
+        return parseInt((String(quality || "").match(/(\d+)p/) || [0, 0])[1], 10) || 0;
     }
 
     hasHls(videos) {
