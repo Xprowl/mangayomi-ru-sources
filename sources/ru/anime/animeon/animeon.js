@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.4.0",
+    "version": "0.5.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
-    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes are in the title JSON (translations -> episodes -> Kodik seria link). Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. If Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
+    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes are in the title JSON (translations -> episodes -> Kodik seria link). A title with several dubs gets a dub filter above the episode list (applyFilter), so the dub is picked per title and only that one is resolved on play; further dubs stay available in the player (voiceList) and are used automatically for the next episode. Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. If Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
 }];
 
 const AO_BASE = "https://animeon.cc";
@@ -132,6 +132,7 @@ class DefaultExtension extends MProvider {
     // Title JSON is up to ~1 MB (One Piece), and the episode fallback below may need
     // it again right after getDetail — keep it for a few minutes.
     async detailData(slug) {
+        if (slug) this._lastSlug = slug;
         if (!slug) return null;
         this._detailCache = this._detailCache || {};
         const hit = this._detailCache[slug];
@@ -210,8 +211,41 @@ class DefaultExtension extends MProvider {
             description: description,
             genre: (data.genres || md.anime_genres || []).slice(0, 40),
             status: this.mapStatus(data.status || md.anime_status),
-            episodes: this.buildEpisodes(data, base)
+            episodes: this.buildEpisodes(data, base),
+            // Titles with more than one voice-over get an "Озвучка" filter above the
+            // episode list (see getFilterList / applyFilter).
+            episodeFilters: this.dubFilters(data)
         };
+    }
+
+    // Voice-overs of a title, most watched first, for the episode-list filter.
+    dubFilters(data) {
+        const translations = (data && data.translations) || {};
+        const names = Object.keys(translations)
+            .filter(n => translations[n] && Object.keys(translations[n].episodes || {}).length > 0)
+            .sort((a, b) => Number(translations[b].viewers || 0) - Number(translations[a].viewers || 0)
+                || a.localeCompare(b));
+        if (names.length < 2) return [];
+        return [{
+            type_name: "SelectFilter",
+            type: "dub",
+            name: "Озвучка",
+            state: 0,
+            values: names.map(n => ({ type_name: "SelectOption", name: n, value: n }))
+        }];
+    }
+
+    // Rebuilds the episode list for the chosen voice-over. Mangayomi calls this when the
+    // user touches the filter in the episode list (no network: the title is cached).
+    async applyFilter(filter, query) {
+        const dub = filter && filter.values && filter.values[filter.state || 0]
+            ? String(filter.values[filter.state || 0].value || "")
+            : "";
+        if (!dub) return null;
+        const slug = (this._lastSlug || "") || (this._lastEp && this._lastSlug) || "";
+        const data = await this.detailData(slug);
+        if (!data) return null;
+        return this.buildEpisodes(data, aoBase(this.source), dub);
     }
 
     mapStatus(status) {
@@ -228,7 +262,7 @@ class DefaultExtension extends MProvider {
     // The title JSON groups Kodik links by voice-over: translations[name].episodes[n].link.
     // By default every episode is listed once per voice-over; the "Озвучка" setting in the
     // source preferences narrows the list down to a single dub.
-    buildEpisodes(data, base) {
+    buildEpisodes(data, base, dub) {
         const seen = {};
         const translations = data.translations || {};
         const slug = data.anime_url || "";
@@ -246,10 +280,12 @@ class DefaultExtension extends MProvider {
 
         tracks.sort((a, b) => b.viewers - a.viewers || a.name.localeCompare(b.name));
 
-        // The voice-over does not matter for the episode list: getVideoList asks Kodik
-        // for every translation of the episode anyway, so one row per episode is enough.
+        // The voice-over is picked per title in the episode-list filter ("Озвучка").
+        // Whatever is chosen, only that dub is resolved on play (~1 s); the others are
+        // one filter switch away.
         const fill = String(aoPref(AO_PREF_FILL, '1')) === '1';
-        const main = tracks[0];
+        const chosen = dub ? tracks.find(t => t.name === dub) : null;
+        const main = chosen || tracks[0];
 
         const rows = [];
         const covered = {};
@@ -281,9 +317,10 @@ class DefaultExtension extends MProvider {
         };
 
         addTrack(main, {});
-        // Fill the episode gaps of the main voice-over from the others (subtitle-only
+        // Fill the episode gaps of the chosen voice-over from the others (subtitle-only
         // releases often miss the last raw episodes). Rows then say who voices them.
-        if (fill) {
+        // Without an explicit pick every voice-over is kept, the main one leading.
+        if (fill || !chosen) {
             for (const t of tracks) {
                 if (t !== main) addTrack(t, { skipCovered: true, fill: true });
             }
