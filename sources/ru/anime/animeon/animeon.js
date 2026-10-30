@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.1.1",
+    "version": "0.2.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
@@ -80,6 +80,53 @@ function aoFilterValue(filters, index) {
     if (!f || !f.values || !f.values.length) return "";
     const option = f.values[f.state || 0];
     return option && typeof option === "object" ? (option.value || "") : "";
+}
+
+// --- voice-over (озвучка) selection -------------------------------------------
+// Stored in Mangayomi's app-wide SharedPreferences, so the keys are prefixed.
+const AO_PREF_DUB = "animeon_dub";
+const AO_PREF_DUB_CUSTOM = "animeon_dub_custom";
+const AO_PREF_FILL = "animeon_dub_fill";
+
+// The site knows ~1000 studio names, but these cover the vast majority of titles;
+// anything else can be typed into the "своя озвучка" field.
+const AO_DUBS = [
+    "AniDUB", "AniLibria_TV", "AniStar", "AnimeVost", "Animedia", "Studio Band",
+    "Persona99", "Dream Cast", "AniBaza", "AniFilm", "SHIZA Project", "Субтитры",
+    "Amazing Dubbing", "Crunchyroll", "Crunchyroll_Subtitles", "AniLiberty",
+    "JAM", "OnWave", "FumoDub", "LE-Production", "ТО Дубляжная", "AniMaunt",
+    "2x2", "AniDub Online", "Kitsune Studio", "Freedub Studio", "AniVolume",
+    "AnimeVibe", "Youkai Studio", "TVShows", "New Horizons Studio", "GoLTFilm"
+];
+
+function aoPref(key, fallback) {
+    try {
+        if (typeof SharedPreferences === "undefined") return fallback;
+        const value = new SharedPreferences().get(key);
+        return value === undefined || value === null ? fallback : value;
+    } catch (e) {
+        return fallback;
+    }
+}
+
+// An explicit "своя озвучка" wins over the drop-down; "" means "all voice-overs".
+function aoDubPref() {
+    const custom = String(aoPref(AO_PREF_DUB_CUSTOM, "") || "").trim();
+    if (custom) return custom;
+    return String(aoPref(AO_PREF_DUB, "") || "").trim();
+}
+
+function aoTrackTag(track) {
+    return track.name + (track.type === "subtitles" ? " · субтитры" : "");
+}
+
+// Exact name first, then a substring match so "AniLib" finds "AniLibria_TV".
+function aoMatchTrack(tracks, dub) {
+    const needle = String(dub || "").trim().toLowerCase();
+    if (!needle) return null;
+    return tracks.find(t => t.name.toLowerCase() === needle)
+        || tracks.find(t => t.name.toLowerCase().indexOf(needle) >= 0)
+        || null;
 }
 
 class DefaultExtension extends MProvider {
@@ -203,10 +250,9 @@ class DefaultExtension extends MProvider {
     }
 
     // The title JSON groups Kodik links by voice-over: translations[name].episodes[n].link.
-    // Most-watched voice-overs go first; every episode keeps its voice-over in the name,
-    // because the same episode exists in a dozen dubs and two subtitle tracks.
+    // By default every episode is listed once per voice-over; the "Озвучка" setting in the
+    // source preferences narrows the list down to a single dub.
     buildEpisodes(data, base) {
-        const episodes = [];
         const seen = {};
         const translations = data.translations || {};
         const slug = data.anime_url || "";
@@ -224,34 +270,69 @@ class DefaultExtension extends MProvider {
 
         tracks.sort((a, b) => b.viewers - a.viewers || a.name.localeCompare(b.name));
 
-        for (const t of tracks) {
-            const tag = t.name + (t.type === "subtitles" ? " · субтитры" : "");
+        const dub = aoDubPref();
+        let chosen = dub ? aoMatchTrack(tracks, dub) : null;
+        const fill = String(aoPref(AO_PREF_FILL, "0")) === "1";
+
+        const rows = [];
+        const covered = {};
+
+        // Selected dub is missing from this title entirely → keep the full grouped list
+        // instead of an empty episode screen.
+        if (chosen) {
+            const hasLinks = t => Object.keys(t.episodes).some(k => t.episodes[k] && t.episodes[k].link);
+            if (!hasLinks(chosen)) chosen = null;
+        }
+
+        const addTrack = (t, opts) => {
+            opts = opts || {};
+            const tag = aoTrackTag(t);
             const keys = Object.keys(t.episodes).map(k => {
                 const num = parseInt(k, 10);
                 return { key: k, num: isNaN(num) ? 0 : num };
             }).sort((a, b) => (a.num || 0) - (b.num || 0) || a.key.localeCompare(b.key));
 
             for (const item of keys) {
+                if (opts.skipCovered && covered[item.key]) continue;
                 const entry = t.episodes[item.key];
                 let link = entry && entry.link ? String(entry.link) : "";
                 if (!link) continue;
                 if (link.startsWith("//")) link = "https:" + link;
                 const label = item.num > 0 ? "Серия " + item.num : item.key;
-                const name = label + " · " + tag;
+                const name = opts.plain ? label : label + " · " + tag;
                 const dedupe = name + "|" + link;
                 if (seen[dedupe]) continue;
                 seen[dedupe] = true;
-                episodes.push({
+                covered[item.key] = true;
+                rows.push({
+                    num: item.num,
+                    views: t.viewers,
                     name: name,
                     // link || voice-over || slug || episode key — the trailing parts let
                     // getVideoList retry the same episode in another voice-over.
-                    url: link + "||" + tag + "||" + slug + "||" + item.key,
-                    dateUpload: Date.now().toString(),
-                    scanlator: null
+                    url: link + "||" + tag + "||" + slug + "||" + item.key
                 });
             }
+        };
+
+        if (chosen) {
+            // A voice-over is selected in the source settings: only its episodes, and
+            // they are just "Серия N" (One Piece has 11 dubs, 4031 rows otherwise).
+            addTrack(chosen, { plain: true });
+            if (fill) {
+                for (const t of tracks) {
+                    if (t !== chosen) addTrack(t, { skipCovered: true });
+                }
+            }
+        } else {
+            // All voice-overs, grouped by episode number: to change the dub of one
+            // episode just pick a neighbouring row, the most watched dub goes first.
+            for (const t of tracks) addTrack(t, {});
+            rows.sort((a, b) => (a.num || 1e9) - (b.num || 1e9) || b.views - a.views);
         }
-        return episodes;
+
+        const stamp = Date.now().toString();
+        return rows.map(r => ({ name: r.name, url: r.url, dateUpload: stamp, scanlator: null }));
     }
 
     async getVideoList(url) {
@@ -348,5 +429,46 @@ class DefaultExtension extends MProvider {
         ];
     }
 
-    getSourcePreferences() { return []; }
+    // "Озвучка" lives in source preferences (they stay with the source, not with the
+    // search form), which is what users expect when they want to change the dub.
+    getSourcePreferences() {
+        const dubEntries = ["Все озвучки (по сериям)"].concat(AO_DUBS);
+        const dubValues = [""].concat(AO_DUBS);
+        const dub = aoDubPref();
+        const inList = dubValues.indexOf(dub);
+        const defaultEntry = inList >= 0 ? inList : dub ? dubEntries.length : 0;
+
+        return [
+            {
+                key: AO_PREF_DUB,
+                listPreference: {
+                    title: "Озвучка",
+                    summary: "Список серий содержит только выбранную озвучку. «Все озвучки» группирует ряды по номеру серии — чтобы сменить озвучку одной серии, выбери соседний ряд. Если озвучки нет в списке — впиши её название в поле ниже.",
+                    valueIndex: defaultEntry,
+                    entries: dubEntries,
+                    entryValues: dubValues
+                }
+            },
+            {
+                key: AO_PREF_DUB_CUSTOM,
+                editTextPreference: {
+                    title: "Своя озвучка (точное имя)",
+                    summary: "Имеет приоритет над списком. Название как на сайте, например «AniRise» или «SovetRomantica_Subtitles». Подходит и часть имени: «AniLib» найдёт «AniLibria_TV». Оставь пустым, чтобы использовать список выше.",
+                    value: "",
+                    dialogTitle: "Название озвучки",
+                    dialogMessage: "Например: AniRise, Onibaku, AniStar & VEEP"
+                }
+            },
+            {
+                key: AO_PREF_FILL,
+                listPreference: {
+                    title: "Добивать пробелы другой озвучкой",
+                    summary: "Если в выбранной озвучке нет некоторых серий — подмешать их из других озвучек (с пометкой студии в названии).",
+                    valueIndex: 1,
+                    entries: ["Нет", "Да"],
+                    entryValues: ["0", "1"]
+                }
+            }
+        ];
+    }
 }
