@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.3.2",
+    "version": "0.4.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
@@ -296,37 +296,98 @@ class DefaultExtension extends MProvider {
     }
 
     async getVideoList(url) {
-        const raw = String(url || "").trim();
+        const raw = String(url || '').trim();
         if (!raw) return [];
-        const parts = raw.split("||");
-        let link = parts[0] || "";
-        const label = parts[1] || "AnimeOn";
-        const slug = parts[2] || "";
-        const epKey = parts[3] || "";
-        if (link.startsWith("//")) link = "https:" + link;
+        const parts = raw.split('||');
+        let link = parts[0] || '';
+        const label = parts[1] || 'AnimeOn';
+        const slug = parts[2] || '';
+        const epKey = parts[3] || '';
+        if (link.startsWith('//')) link = 'https:' + link;
         if (!/^https?:\/\//i.test(link)) return [];
 
-        // Kodik resolves to HLS 240–720 with the site's referer; the iframe is appended
-        // as the last option by the shared extractor. Resolving every voice-over here
-        // is what makes playback feel slower than a direct MP4 site, so the result is
-        // remembered per episode for a while (the HLS URLs live ~24 h).
+        // Speed first: only the episode's own voice-over is resolved (~0.8 s). The other
+        // voice-overs of the same episode are added on demand by voiceList() when the
+        // episode was just opened — a mediaPlayerClose call means the user has seen the
+        // list, so the extra dubs are not worth delaying playback.
         this._videoCache = this._videoCache || {};
         const hit = this._videoCache[link];
         if (hit && Date.now() - hit.at < AO_VIDEO_CACHE_TTL) return this.reorder(hit.videos, label);
-        const videos = await kodikExtract(this.client, link, aoBase(this.source), label, { allTranslations: true });
+
+        const videos = await kodikExtract(this.client, link, aoBase(this.source), label, {});
         if (this.hasHls(videos)) {
-            this._videoCache[link] = { at: Date.now(), videos: videos };
+            this._videoCache[link] = { at: Date.now(), videos: videos, full: false };
+            this._lastEp = link;
             return this.reorder(videos, label);
         }
 
         // Kodik drops individual episodes over time (the iframe answers 500 and the
         // extractor returns nothing). The same episode normally still exists in another
-        // voice-over, so try a couple of them before reporting "no video".
+        // voice-over, so try a couple of them before reporting 'no video'.
         for (const alt of await this.altLinks(slug, epKey, link)) {
-            const tried = await kodikExtract(this.client, alt.link, aoBase(this.source), alt.tag);
-            if (this.hasHls(tried)) return tried;
+            const tried = await kodikExtract(this.client, alt.link, aoBase(this.source), alt.tag, {});
+            if (this.hasHls(tried)) {
+                this._videoCache[link] = { at: Date.now(), videos: tried, full: false };
+                this._lastEp = link;
+                return this.reorder(tried, alt.tag);
+            }
         }
         return videos;
+    }
+
+    // All voice-overs of the episode on screen, for the 'Media' entry the player opens
+    // while watching. Called right after getVideoList, so the UI is already playable.
+    async voiceList(url) {
+        const raw = String(url || '').trim();
+        if (!raw) return [];
+        let link = (raw.split('||')[0] || '').trim();
+        if (!link) link = this._lastEp || '';
+        if (link.startsWith('//')) link = 'https:' + link;
+        if (!/^https?:\/\//i.test(link)) return [];
+
+        this._videoCache = this._videoCache || {};
+        const hit = this._videoCache[link];
+        if (hit && hit.full) return this.reorder(hit.videos, '');
+        const videos = await kodikExtract(this.client, link, aoBase(this.source), 'AnimeOn', { allTranslations: true });
+        if (!this.hasHls(videos)) return [];
+        this._videoCache[link] = { at: Date.now(), videos: videos, full: true };
+        return this.reorder(videos, '');
+    }
+
+    // Kodik answers quality by quality, and every entry is a separate voice-over, so the
+    // player menu is rebuilt as
+    //   Studio Band 720p      <- default source (starts playing right away)
+    //   2x2 720p | 2x2 480p | AniDUB 720p | AniDUB 480p | ...
+    // i.e. the default first, then one block per voice-over (highest quality first).
+    reorder(videos, firstTag) {
+        const list = (videos || []).slice();
+        const tag = (q) => String(q || '').replace(/ \d+p$/, '');
+        const quality = (v) => parseInt((String(v.quality).match(/(\d+)p/) || [0, 0])[1], 10);
+        const order = [];
+        const groups = {};
+        for (const v of list) {
+            const t = tag(v.quality);
+            if (!groups[t]) { groups[t] = []; order.push(t); }
+            groups[t].push(v);
+        }
+        if (!order.length) return list;
+        // The default source (first item) must stay first — the player starts on it.
+        const main = list[0];
+        const mainTag = tag(main.quality);
+        const out = [main];
+        const others = list.filter(v => v !== main);
+        // One block per voice-over; the default's own block leads, the rest keep the
+        // order Kodik listed them in.
+        const lead = others.filter(v => tag(v.quality) === mainTag).sort((a, b) => quality(b) - quality(a));
+        const rest = others.filter(v => tag(v.quality) !== mainTag);
+        out.push.apply(out, lead);
+        for (const t of order) {
+            if (t === mainTag) continue;
+            for (const v of rest.filter(x => tag(x.quality) === t).sort((a, b) => quality(b) - quality(a))) {
+                out.push(v);
+            }
+        }
+        return out;
     }
 
     // Mangayomi calls this for autoplay "next episode": only the voice-over that was being
@@ -349,41 +410,11 @@ class DefaultExtension extends MProvider {
     }
 
     hasHls(videos) {
-        return (videos || []).some(v => / \d+p$/.test(String(v.quality || '')));
-    }
-
-    // Kodik answers quality by quality ('240','360','480','720'), and every entry is a
-    // separate voice-over. The player menu is the same list, so it is rebuilt as
-    //   Studio Band 720p   <- default source
-    //   2x2 720p | 2x2 480p | ... | AniDUB 720p | AniDUB 480p | ...
-    // i.e. the default first, then one block per voice-over (highest quality first).
-    reorder(videos, firstTag) {
-        const list = (videos || []).slice();
-        const tag = (q) => String(q || '').replace(/ \d+p$/, '');
-        const order = [];
-        const groups = {};
-        for (const v of list) {
-            const t = tag(v.quality);
-            if (!groups[t]) { groups[t] = []; order.push(t); }
-            groups[t].push(v);
-        }
-        if (!order.length) return list;
-        const quality = (v) => parseInt((String(v.quality).match(/(\d+)p/) || [0, 0])[1], 10);
-        const mainList = groups[order[0]].slice().sort((a, b) => quality(b) - quality(a));
-        const main = mainList[0];
-        const out = main ? [main] : [];
-        const first = order.indexOf(firstTag) >= 0 ? firstTag : order[0];
-        for (const t of [first].concat(order.filter(x => x !== first))) {
-            for (const v of groups[t].slice().sort((a, b) => quality(b) - quality(a))) {
-                if (v !== main) out.push(v);
-            }
-        }
-        return out;
+        return (videos || []).some(v => / \d+p$/.test(String(v.quality || "")));
     }
 
     // Other voice-overs that have the same episode key, most watched first.
-    async altLinks(slug, epKey, usedLink) {
-        if (!slug || !epKey) return [];
+    async altLinks(slug, epKey, usedLink) {        if (!slug || !epKey) return [];
         const data = await this.detailData(slug);
         if (!data) return [];
         const translations = data.translations || {};
