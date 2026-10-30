@@ -6,6 +6,11 @@
  * The worker fetches each playlist/segment once from Cloudflare's network (outside the
  * blocked region), caches it with the edge cache and serves it without DDoS-Guard.
  *
+ * Quota: a series is ~250 segments. Each segment is stored in Cloudflare's edge cache
+ * for a week, and cache hits are answered by Cloudflare *without* running (and
+ * billing) the worker — only the first download of a segment costs a request. So the
+ * free 100k/day is roughly "first download of ~400 episodes' worth of segments".
+ *
  * Usage:
  *   1. Install Wrangler:            npm i -g wrangler
  *   2. wrangler login
@@ -28,6 +33,9 @@ const ALLOWED_HOSTS = [
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+const PLAYLIST_TTL = 60;        // seconds
+const MEDIA_TTL = 7 * 86400;    // seconds — segments never change
 
 function hostAllowed(host) {
   const h = String(host || "").toLowerCase();
@@ -52,6 +60,10 @@ function jsonError(status, message) {
   });
 }
 
+function isPlaylist(url, contentType) {
+  return /\.m3u8(\?|$)/i.test(url.pathname + url.search) || /mpegurl/i.test(contentType || "");
+}
+
 /** Rewrite a playlist so every URI goes back through this worker. */
 function rewritePlaylist(body, target, workerOrigin) {
   const base = new URL(target);
@@ -74,6 +86,35 @@ function rewritePlaylist(body, target, workerOrigin) {
       return `${workerOrigin}/?u=${encodeURIComponent(abs)}`;
     })
     .join("\n");
+}
+
+/** Turn the upstream response into ours: playlists rewritten, media passed through. */
+async function buildResponse(upstream, parsed, origin, method, ttl) {
+  const contentType = upstream.headers.get("Content-Type") || "";
+
+  if (isPlaylist(parsed, contentType)) {
+    const text = await upstream.text();
+    return new Response(rewritePlaylist(text, parsed.toString(), origin), {
+      status: upstream.status,
+      headers: corsHeaders({
+        "Content-Type": "application/x-mpegURL",
+        "Cache-Control": `public, max-age=${ttl}`
+      })
+    });
+  }
+
+  const headers = corsHeaders({});
+  for (const name of ["Content-Type", "Content-Length", "Accept-Ranges", "Content-Range"]) {
+    const value = upstream.headers.get(name);
+    if (value) headers[name] = value;
+  }
+  if (!headers["Content-Type"]) headers["Content-Type"] = "video/MP2T";
+  headers["Cache-Control"] = `public, max-age=${ttl}`;
+
+  return new Response(method === "HEAD" ? null : upstream.body, {
+    status: upstream.status,
+    headers
+  });
 }
 
 export default {
@@ -108,63 +149,42 @@ export default {
     };
     if (range) upstreamHeaders["Range"] = range;
 
-    // The edge cache keeps a segment for a day and a playlist for a minute.
-    const isPlaylist = /\.m3u8(\?|$)/i.test(parsed.pathname + parsed.search);
+    // A playlist lives a minute, media a week. A cache hit is answered by Cloudflare
+    // itself, so replays and seeks cost no worker requests at all.
     const cache = caches.default;
     const cacheKey = new Request(parsed.toString(), { method: "GET" });
+    const playlistRequest = isPlaylist(parsed, "");
+    const ttl = playlistRequest ? PLAYLIST_TTL : MEDIA_TTL;
 
-    let upstream;
-    let fromCache = false;
-    if (isPlaylist && !range) {
+    if (!range) {
       const cached = await cache.match(cacheKey);
       if (cached) {
-        upstream = cached;
-        fromCache = true;
-      }
-    }
-    if (!upstream) {
-      try {
-        upstream = await fetch(parsed.toString(), { headers: upstreamHeaders, redirect: "follow" });
-      } catch (e) {
-        return jsonError(502, "upstream_unreachable");
-      }
-      if (isPlaylist && !range && upstream.ok) {
-        await cache.put(
-          cacheKey,
-          new Response(upstream.clone().body, {
-            headers: { "Content-Type": "application/x-mpegURL", "Cache-Control": "public, max-age=60" }
-          })
-        );
+        // Playlists are cached raw, so they still need rewriting for this origin.
+        const contentType = cached.headers.get("Content-Type") || "";
+        return buildResponse(cached, parsed, url.origin, request.method, ttl);
       }
     }
 
-    const ct = upstream.headers.get("Content-Type") || "";
-    const looksPlaylist = isPlaylist || /mpegurl/i.test(ct);
+    let upstream;
+    try {
+      upstream = await fetch(parsed.toString(), { headers: upstreamHeaders, redirect: "follow" });
+    } catch (e) {
+      return jsonError(502, "upstream_unreachable");
+    }
 
-    if (looksPlaylist) {
-      const text = await upstream.text();
-      const body = rewritePlaylist(text, parsed.toString(), url.origin);
-      return new Response(body, {
-        status: upstream.status,
-        headers: corsHeaders({
-          "Content-Type": "application/x-mpegURL",
-          "Cache-Control": "public, max-age=30"
+    if (!range && upstream.ok) {
+      // Cache the raw body; the rewritten playlist is produced on every response.
+      await cache.put(
+        cacheKey,
+        new Response(upstream.clone().body, {
+          headers: {
+            "Content-Type": upstream.headers.get("Content-Type") || (playlistRequest ? "application/x-mpegURL" : "video/MP2T"),
+            "Cache-Control": `public, max-age=${ttl}`
+          }
         })
-      });
+      );
     }
 
-    // Media: stream through untouched, keep Range/Content-Type/Length for the player.
-    const headers = corsHeaders({});
-    for (const name of ["Content-Type", "Content-Length", "Accept-Ranges", "Content-Range"]) {
-      const value = upstream.headers.get(name);
-      if (value) headers[name] = value;
-    }
-    if (!headers["Content-Type"]) headers["Content-Type"] = "video/MP2T";
-    headers["Cache-Control"] = "public, max-age=86400";
-
-    return new Response(request.method === "HEAD" ? null : upstream.body, {
-      status: upstream.status,
-      headers
-    });
+    return buildResponse(upstream, parsed, url.origin, request.method, ttl);
   }
 };
