@@ -10,17 +10,18 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.3.0",
+    "version": "0.3.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
-    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes and voice-overs are in the title JSON (translations -> episodes -> Kodik seria link), so no HTML parsing is needed. Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. If Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
+    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes are in the title JSON (translations -> episodes -> Kodik seria link). Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. If Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
 }];
 
 const AO_BASE = "https://animeon.cc";
 const AO_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const AO_PAGE_SIZE = 20;
 const AO_CACHE_TTL = 10 * 60 * 1000;
+const AO_VIDEO_CACHE_TTL = 30 * 60 * 1000;
 
 const AO_GENRES = [
     "Экшен", "Комедия", "Фэнтези", "Приключения", "Фантастика", "Драма", "Романтика",
@@ -306,8 +307,17 @@ class DefaultExtension extends MProvider {
         if (!/^https?:\/\//i.test(link)) return [];
 
         // Kodik resolves to HLS 240–720 with the site's referer; the iframe is appended
-        // as the last option by the shared extractor.
+        // as the last option by the shared extractor. Resolving every voice-over here
+        // is what makes playback feel slower than a direct MP4 site, so the result is
+        // remembered per episode for a while (the HLS URLs live ~24 h).
+        this._videoCache = this._videoCache || {};
+        const hit = this._videoCache[link];
+        if (hit && Date.now() - hit.at < AO_VIDEO_CACHE_TTL) return this.reorder(hit.videos, label);
         const videos = await kodikExtract(this.client, link, aoBase(this.source), label, { allTranslations: true });
+        if (this.hasHls(videos)) {
+            this._videoCache[link] = { at: Date.now(), videos: videos };
+            return this.reorder(videos, label);
+        }
         if (this.hasHls(videos)) return videos;
 
         // Kodik drops individual episodes over time (the iframe answers 500 and the
@@ -321,7 +331,36 @@ class DefaultExtension extends MProvider {
     }
 
     hasHls(videos) {
-        return (videos || []).some(v => / \d+p$/.test(String(v.quality || "")));
+        return (videos || []).some(v => / \d+p$/.test(String(v.quality || '')));
+    }
+
+    // Kodik answers quality by quality ('240','360','480','720'), and every entry is a
+    // separate voice-over. The player menu is the same list, so it is rebuilt as
+    //   Studio Band 720p   <- default source
+    //   2x2 720p | 2x2 480p | ... | AniDUB 720p | AniDUB 480p | ...
+    // i.e. the default first, then one block per voice-over (highest quality first).
+    reorder(videos, firstTag) {
+        const list = (videos || []).slice();
+        const tag = (q) => String(q || '').replace(/ \d+p$/, '');
+        const order = [];
+        const groups = {};
+        for (const v of list) {
+            const t = tag(v.quality);
+            if (!groups[t]) { groups[t] = []; order.push(t); }
+            groups[t].push(v);
+        }
+        if (!order.length) return list;
+        const quality = (v) => parseInt((String(v.quality).match(/(\d+)p/) || [0, 0])[1], 10);
+        const mainList = groups[order[0]].slice().sort((a, b) => quality(b) - quality(a));
+        const main = mainList[0];
+        const out = main ? [main] : [];
+        const first = order.indexOf(firstTag) >= 0 ? firstTag : order[0];
+        for (const t of [first].concat(order.filter(x => x !== first))) {
+            for (const v of groups[t].slice().sort((a, b) => quality(b) - quality(a))) {
+                if (v !== main) out.push(v);
+            }
+        }
+        return out;
     }
 
     // Other voice-overs that have the same episode key, most watched first.
