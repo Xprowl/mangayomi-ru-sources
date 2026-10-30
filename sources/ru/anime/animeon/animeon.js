@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.7.0",
+    "version": "0.8.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
-    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes are in the title JSON (translations -> episodes -> Kodik seria link). Every episode row carries its dub in scanlator, so the dub is switched with Mangayomi's own episode filter (Filter -> group by scanlator); only the watched dub is resolved on play; the full dub list also stays available in the player (voiceList) and the next episode continues in the same dub. Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. If Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
+    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes are in the title JSON (translations -> episodes -> Kodik seria link). Every episode row carries its dub in scanlator, so the dub is switched with Mangayomi's own episode filter (Filter -> group by scanlator); only the watched dub is resolved on play; the full dub list also stays available in the player (voiceList) and the next episode continues in the same dub. Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. An optional free Cloudflare Worker proxy (settings -> animeon_proxy) can sit between the app and Kodik; if Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
 }];
 
 const AO_BASE = "https://animeon.cc";
@@ -90,6 +90,7 @@ function aoFilterValue(filters, index) {
 // gets a normal "озвучка" switch.
 const AO_PREF_DUB = "animeon_dub";
 const AO_PREF_FILL = "animeon_dub_fill";
+const AO_PREF_PROXY = "animeon_proxy";
 
 function aoPref(key, fallback) {
     try {
@@ -320,13 +321,13 @@ class DefaultExtension extends MProvider {
         // list, so the extra dubs are not worth delaying playback.
         this._videoCache = this._videoCache || {};
         const hit = this._videoCache[link];
-        if (hit && Date.now() - hit.at < AO_VIDEO_CACHE_TTL) return this.reorder(hit.videos, label);
+        if (hit && Date.now() - hit.at < AO_VIDEO_CACHE_TTL) return this.rewriteProxy(this.reorder(hit.videos, label));
 
         const videos = await kodikExtract(this.client, link, aoBase(this.source), label, {});
         if (this.hasHls(videos)) {
             this._videoCache[link] = { at: Date.now(), videos: videos, full: false };
             this._lastEp = link;
-            return this.reorder(videos, label);
+            return this.rewriteProxy(this.reorder(videos, label));
         }
 
         // Kodik drops individual episodes over time (the iframe answers 500 and the
@@ -337,10 +338,39 @@ class DefaultExtension extends MProvider {
             if (this.hasHls(tried)) {
                 this._videoCache[link] = { at: Date.now(), videos: tried, full: false };
                 this._lastEp = link;
-                return this.reorder(tried, alt.tag);
+                return this.rewriteProxy(this.reorder(tried, alt.tag));
             }
         }
         return videos;
+    }
+
+    // Optional free proxy (a Cloudflare Worker from cloudflare/kodik-proxy-worker.js):
+    // Kodik's CDN is behind DDoS-Guard and geo-restricted, the worker fetches the stream
+    // once from outside and serves it without the checks, so playback starts at once.
+    proxyBase() {
+        const raw = String(aoPref(AO_PREF_PROXY, '') || '').trim().replace(/\/+$/, '');
+        if (!raw) return '';
+        return /^https?:\/\//i.test(raw) ? raw : 'https://' + raw;
+    }
+
+    rewriteProxy(videos) {
+        const base = this.proxyBase();
+        if (!base) return videos;
+        const enc = (u) => base + '/?u=' + encodeURIComponent(u);
+        const out = [];
+        for (const v of videos) {
+            const url = String(v.url || '');
+            if (!/^https?:\/\//i.test(url)) { out.push(v); continue; }
+            // Everything goes through the worker: the playlist, and then its segments
+            // (the worker rewrites those itself).
+            out.push({
+                url: enc(url),
+                originalUrl: url,
+                quality: v.quality,
+                headers: { 'User-Agent': AO_UA, 'Referer': 'https://kodikplayer.com/' }
+            });
+        }
+        return out;
     }
 
     // All voice-overs of the episode on screen, for the 'Media' entry the player opens
@@ -355,11 +385,11 @@ class DefaultExtension extends MProvider {
 
         this._videoCache = this._videoCache || {};
         const hit = this._videoCache[link];
-        if (hit && hit.full) return this.reorder(hit.videos, '');
+        if (hit && hit.full) return this.rewriteProxy(this.reorder(hit.videos, ''));
         const videos = await kodikExtract(this.client, link, aoBase(this.source), 'AnimeOn', { allTranslations: true });
         if (!this.hasHls(videos)) return [];
         this._videoCache[link] = { at: Date.now(), videos: videos, full: true };
-        return this.reorder(videos, '');
+        return this.rewriteProxy(this.reorder(videos, ''));
     }
 
     // Kodik answers quality by quality, and every entry is a separate voice-over, so the
@@ -488,6 +518,16 @@ class DefaultExtension extends MProvider {
     // is left here is filling the episode gaps of the main voice-over.
     getSourcePreferences() {
         return [
+            {
+                key: AO_PREF_PROXY,
+                editTextPreference: {
+                    title: "Прокси для видео (необязательно)",
+                    summary: "Адрес своего бесплатного прокси (Cloudflare Worker), например https://animeon-video.имя.workers.dev — тогда поток идёт через него. Пусто — видео напрямую с Kodik.",
+                    value: "",
+                    dialogTitle: "Адрес прокси",
+                    dialogMessage: "https://animeon-video.имя.workers.dev"
+                }
+            },
             {
                 key: AO_PREF_FILL,
                 listPreference: {
