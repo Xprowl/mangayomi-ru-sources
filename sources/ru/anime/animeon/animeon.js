@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 1,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.5.0",
+    "version": "0.6.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/anime/animeon.js",
-    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes are in the title JSON (translations -> episodes -> Kodik seria link). A title with several dubs gets a dub filter above the episode list (applyFilter), so the dub is picked per title and only that one is resolved on play; further dubs stay available in the player (voiceList) and are used automatically for the next episode. Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. If Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
+    "notes": "AnimeOn (animeon.cc, Next.js). Everything comes from the site's own JSON API: catalog /api/anime (search, genre, kind, status, year, sort), title page /api/anime/<slug>. Episodes are in the title JSON (translations -> episodes -> Kodik seria link). Every episode row carries its dub in scanlator, so the dub is switched with Mangayomi's own episode filter (Filter -> group by scanlator); only the watched dub is resolved on play; the full dub list also stays available in the player (voiceList) and the next episode continues in the same dub. Video — Kodik HLS 240/360/480/720 (referer animeon.cc) plus the player iframe as a fallback. If Kodik has dropped an episode, the same episode is retried in up to two other voice-overs. Titles without any translation (announcements) have no episodes."
 }];
 
 const AO_BASE = "https://animeon.cc";
@@ -194,7 +194,7 @@ class DefaultExtension extends MProvider {
     }
 
     async getDetail(url) {
-        const empty = { name: "", imageUrl: "", description: "", genre: [], status: 5, episodes: [] };
+        const empty = { name: '', imageUrl: '', description: '', genre: [], status: 5, episodes: [] };
         const slug = aoSlug(url);
         if (!slug) return empty;
         const data = await this.detailData(slug);
@@ -202,7 +202,7 @@ class DefaultExtension extends MProvider {
 
         const base = aoBase(this.source);
         const md = data.material_data || {};
-        const description = String(md.anime_description || data.description || "").trim();
+        const description = String(md.anime_description || data.description || '').trim();
         const imageUrl = aoPoster(base, { poster: data.poster, material_data: md });
 
         return {
@@ -211,41 +211,31 @@ class DefaultExtension extends MProvider {
             description: description,
             genre: (data.genres || md.anime_genres || []).slice(0, 40),
             status: this.mapStatus(data.status || md.anime_status),
-            episodes: this.buildEpisodes(data, base),
-            // Titles with more than one voice-over get an "Озвучка" filter above the
-            // episode list (see getFilterList / applyFilter).
-            episodeFilters: this.dubFilters(data)
+            // Episode rows carry the voice-over in scanlator, so Mangayomi's own
+            // episode filter (Filter → 'Фильтр по группам') switches dubs offline.
+            episodes: this.buildEpisodes(data, base)
         };
     }
 
-    // Voice-overs of a title, most watched first, for the episode-list filter.
-    dubFilters(data) {
+    // Mangayomi's detail page has no custom episode-list filters (no applyFilter hook),
+    // but it does group episodes by scanlator — the same list the manga sources fill
+    // with translator groups. Titles with several dubs always list every episode in
+    // every dub, so that filter is where the voice-over is switched.
+    dubTracks(data) {
         const translations = (data && data.translations) || {};
-        const names = Object.keys(translations)
-            .filter(n => translations[n] && Object.keys(translations[n].episodes || {}).length > 0)
-            .sort((a, b) => Number(translations[b].viewers || 0) - Number(translations[a].viewers || 0)
-                || a.localeCompare(b));
-        if (names.length < 2) return [];
-        return [{
-            type_name: "SelectFilter",
-            type: "dub",
-            name: "Озвучка",
-            state: 0,
-            values: names.map(n => ({ type_name: "SelectOption", name: n, value: n }))
-        }];
-    }
-
-    // Rebuilds the episode list for the chosen voice-over. Mangayomi calls this when the
-    // user touches the filter in the episode list (no network: the title is cached).
-    async applyFilter(filter, query) {
-        const dub = filter && filter.values && filter.values[filter.state || 0]
-            ? String(filter.values[filter.state || 0].value || "")
-            : "";
-        if (!dub) return null;
-        const slug = (this._lastSlug || "") || (this._lastEp && this._lastSlug) || "";
-        const data = await this.detailData(slug);
-        if (!data) return null;
-        return this.buildEpisodes(data, aoBase(this.source), dub);
+        const tracks = Object.keys(translations).map(name => {
+            const t = translations[name] || {};
+            return {
+                name: name,
+                type: t.type || '',
+                viewers: Number(t.viewers || 0),
+                season: Number(t.season || 0),
+                episodes: t.episodes || {}
+            };
+        }).filter(t => t.name && Object.keys(t.episodes).length > 0);
+        const seasons = new Set(tracks.map(t => t.season || 1));
+        for (const t of tracks) t.seasonsCount = seasons.size;
+        return tracks.sort((a, b) => b.viewers - a.viewers || a.name.localeCompare(b.name));
     }
 
     mapStatus(status) {
@@ -260,38 +250,20 @@ class DefaultExtension extends MProvider {
     }
 
     // The title JSON groups Kodik links by voice-over: translations[name].episodes[n].link.
-    // By default every episode is listed once per voice-over; the "Озвучка" setting in the
-    // source preferences narrows the list down to a single dub.
+    // Every episode is listed once per voice-over, and scanlator carries the studio —
+    // that is what Mangayomi's episode filter groups by. The most watched dub leads.
+    // dub limits the list to a single voice-over (used when a link is retried).
     buildEpisodes(data, base, dub) {
-        const seen = {};
-        const translations = data.translations || {};
-        const slug = data.anime_url || "";
-
-        const tracks = Object.keys(translations).map(name => {
-            const t = translations[name] || {};
-            return {
-                name: name,
-                type: t.type || "",
-                viewers: Number(t.viewers || 0),
-                season: t.season || 0,
-                episodes: t.episodes || {}
-            };
-        }).filter(t => t.name && Object.keys(t.episodes).length > 0);
-
-        tracks.sort((a, b) => b.viewers - a.viewers || a.name.localeCompare(b.name));
-
-        // The voice-over is picked per title in the episode-list filter ("Озвучка").
-        // Whatever is chosen, only that dub is resolved on play (~1 s); the others are
-        // one filter switch away.
-        const fill = String(aoPref(AO_PREF_FILL, '1')) === '1';
-        const chosen = dub ? tracks.find(t => t.name === dub) : null;
-        const main = chosen || tracks[0];
+        const tracks = this.dubTracks(data);
+        const main = dub ? tracks.find(t => t.name === dub) : null;
+        const list = main ? [main] : tracks;
+        const slug = data.anime_url || '';
 
         const rows = [];
-        const covered = {};
+        const seen = {};
+        const stamp = Date.now().toString();
 
-        const addTrack = (t, opts) => {
-            opts = opts || {};
+        for (const t of list) {
             const tag = aoTrackTag(t);
             const keys = Object.keys(t.episodes).map(k => {
                 const num = parseInt(k, 10);
@@ -299,37 +271,36 @@ class DefaultExtension extends MProvider {
             }).sort((a, b) => (a.num || 0) - (b.num || 0) || a.key.localeCompare(b.key));
 
             for (const item of keys) {
-                if (opts.skipCovered && covered[item.key]) continue;
                 const entry = t.episodes[item.key];
                 let link = entry && entry.link ? String(entry.link) : '';
                 if (!link) continue;
                 if (link.startsWith('//')) link = 'https:' + link;
-                const label = item.num > 0 ? 'Серия ' + item.num : item.key;
-                covered[item.key] = true;
+                // Season+tracks keep the names unique: Mangayomi drops episodes whose
+                // (name, scanlator) pair already exists.
+                const name = (item.num > 0 ? 'Episode ' + item.num : item.key) + (t.seasonsCount > 1 ? ' · сезон ' + t.season : '');
+                const dedupe = name + '|' + tag + '|' + link;
+                if (seen[dedupe]) continue;
+                seen[dedupe] = true;
                 rows.push({
                     num: item.num,
-                    name: opts.fill ? label + ' · ' + tag : label,
+                    name: name,
                     // link || voice-over || slug || episode key — the trailing parts let
                     // getVideoList retry the same episode in another voice-over.
-                    url: link + '||' + tag + '||' + slug + '||' + item.key
+                    url: link + '||' + tag + '||' + slug + '||' + item.key,
+                    dateUpload: stamp,
+                    // Mangayomi's episode filter ('Фильтр по группам') groups by this.
+                    scanlator: tag
                 });
-            }
-        };
-
-        addTrack(main, {});
-        // Fill the episode gaps of the chosen voice-over from the others (subtitle-only
-        // releases often miss the last raw episodes). Rows then say who voices them.
-        // Without an explicit pick every voice-over is kept, the main one leading.
-        if (fill || !chosen) {
-            for (const t of tracks) {
-                if (t !== main) addTrack(t, { skipCovered: true, fill: true });
             }
         }
 
         rows.sort((a, b) => (a.num || 1e9) - (b.num || 1e9));
-
-        const stamp = Date.now().toString();
-        return rows.map(r => ({ name: r.name, url: r.url, dateUpload: stamp, scanlator: null }));
+        return rows.map(r => ({
+            name: r.name,
+            url: r.url,
+            dateUpload: r.dateUpload,
+            scanlator: r.scanlator
+        }));
     }
 
     async getVideoList(url) {
