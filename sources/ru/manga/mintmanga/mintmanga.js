@@ -3,18 +3,18 @@
 const mangayomiSources = [{
     "name": "MintManga",
     "lang": "ru",
-    "baseUrl": "https://2.mintmanga.one",
+    "baseUrl": "https://mintmanga.one",
     "apiUrl": "",
     "iconUrl": "",
     "typeSource": "single",
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.4.0",
+    "version": "0.5.0",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/mintmanga.js",
-    "notes": "Актуальный mirror: 2.mintmanga.one. mintmanga.live редиректит сюда. Alt: seimanga.me"
+    "notes": "MintManga — теперь mintmanga.one (WordPress-сайт, не Grouple). 0.5.0: старые зеркала (*.mintmanga.com, 2.mintmanga.one, mintmanga.live) отдают «NOT FOUND», поэтому baseUrl смотрит на mintmanga.one; остальные зеркала можно переопределить в настройках источника. Прежняя Grouple-читка (mintmanga.one/<slug>__A123) отдаётся только поддоменами вида 24.mintmanga.one, которые резолвятся не из всех сетей."
 }];
 
 class DefaultExtension extends MProvider {
