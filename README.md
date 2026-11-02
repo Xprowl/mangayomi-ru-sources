@@ -163,11 +163,15 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 ## Как получить session cookie (для Grouple / Author.Today)
 
-1. Открой **2.mintmanga.one** / **20.allhen.online** / **author.today**
+1. Открой **mintmanga.live** (или **2.mintmanga.one**) / **20.allhen.online** / **author.today**
 2. Залогинься (можно бесплатным аккаунтом)
-3. F12 → вкладка **Application** → раздел **Cookies** → выбрать домен сайта
+3. Открой DevTools: **F12** → вкладка **Application** (Chrome/Edge; в Firefox — «Веб-хранилище / Хранилище» → **Cookies**) → раздел **Cookies** → выбрать именно домен сайта (`mintmanga.live`, а не `zz.one-way.work` и прочие CDN)
 4. Скопируй ВСЕ cookies в одну строку формата `key1=value1; key2=value2; key3=value3`
+   - в Chrome/Edge это проще так: тот же раздел Cookies, но контекстное меню по любой строке → **Copy** → создать файл → **Paste** → распаковать строки в формате `name=value;` → склеить в строку через `; `
+   - нужны минимум `PHPSESSID` и `dle_user_id` / `dle_password` (или `user_id` + `user_token`) — именно они дают логин
 5. В Mangayomi: источник → ⚙ Settings → "Session cookie" → вставь
+
+> Cookie-строка «живёт», пока жив аккаунт; при смене пароля или «выйти на всех устройствах» старые cookies умирают — повтори процедуру.
 
 ---
 
@@ -175,8 +179,7 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 | Группа | Доступные настройки |
 |---|---|
-| **Grouple** (ReadManga/MintManga/SelfManga/AllHentai) | `Override baseUrl` (если домен заблокирован) + `Session cookie` (для 18+ и DMCA-блокированных глав) |
-| **Lib** (MangaLib/HentaiLib/AniLib/RanobeLib) | `Image server` (5 вариантов CDN) + `Auth token (Bearer)` |
+| **Grouple** (ReadManga/MintManga/SelfManga/AllHentai) | `Override baseUrl` (если домен заблокирован) + `Session cookie` (для 18+ и DMCA-блокированных глав) || **Lib** (MangaLib/HentaiLib/AniLib/RanobeLib) | `Image server` (5 вариантов CDN) + `Auth token (Bearer)` |
 | **Remanga** | Bearer token для платного |
 | **Desu** | `Override baseUrl` (`desu.uno`/`desu.city`/`desu.me` редиректят) |
 | **AniLibria** | `Default quality` (480p / **720p** / 1080p) |
