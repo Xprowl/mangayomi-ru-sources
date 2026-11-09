@@ -14,10 +14,10 @@
 
 | Что подключить | URL |
 |---|---|
-| **Всё (32 источника)** | `https://redcatpet.github.io/mangayomi-ru-sources/index.json` |
-| Только манга (13) | `https://redcatpet.github.io/mangayomi-ru-sources/manga_index.json` |
-| Только аниме (13) | `https://redcatpet.github.io/mangayomi-ru-sources/anime_index.json` |
-| Только новеллы (6) | `https://redcatpet.github.io/mangayomi-ru-sources/novel_index.json` |
+| **Всё (32 источника)** | `https://xprowl.github.io/mangayomi-ru-sources/index.json` |
+| Только манга (13) | `https://xprowl.github.io/mangayomi-ru-sources/manga_index.json` |
+| Только аниме (13) | `https://xprowl.github.io/mangayomi-ru-sources/anime_index.json` |
+| Только новеллы (6) | `https://xprowl.github.io/mangayomi-ru-sources/novel_index.json` |
 
 После импорта включи нужные источники.
 
@@ -43,6 +43,8 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 **Новеллы (5):** Jaomix · RanobeHub · RanobeLib · Ранобэ.рф · Tl.Rulate
 
+> **v0.10.9**: **Обложки и старые главы MintManga.** Причина пустых обложек — картинки лежат на CDN `zz.one-way.work`, который отдаёт **403** при Referer `google.com` или без Referer (а именно такие заголовки использовались для страниц). Теперь у всех четырёх Grouple-источников есть `getHeaders()` и отдельные заголовки для картинок: `Referer` = сам сайт (`https://mintmanga.live/` и т. п.), `Accept: image/*`. Проверено: та же картинка без заголовков — 403 (612 Б), с новыми — 200 `image/webp`/`image/jpeg`. Вторая причина «нет доступных страниц» в MintManga — старые главы в библиотеке хранят абсолютный URL мёртвого блог-зеркала (`mintmanga.one`, `*.mintmanga.com`, `.me`), и замена baseUrl их не трогала. Добавлен `groupleRewriteHost()`: любой такой хост в URL главы на лету переписывается на текущий baseUrl перед запросом, так что уже добавленные тайтлы читаются без повторного добавления. Версии: MintManga 0.5.3, SelfManga 0.4.2, ReadManga 0.4.2, AllHentai 0.4.2.
+>
 > **v0.10.8**: **18+ читается без токенов и cookie.** `grouple_base` теперь сам подставляет возрастной параметр `?mtr=1` в **любой** запрос главы (SelfManga / ReadManga / MintManga / AllHentai), а не только в ссылки, которые строит карточка тайтла. Причина: на 18+ главу без `mtr` Grouple отдаёт страницу-предупреждение (в ответе нет `readerInit`), поэтому глава выглядела пустой; старые сохранённые главы, «продолжить чтение» и deep links приходили без параметра. Проверено на SelfManga в чистом клиенте (ноль cookie): «Тяга к тебе» (18+) — 45 глав, 64 страницы, первая картинка 109 КБ `image/jpeg`. Заглушки `deleted1.png` (глава снята правообладателем) больше не выдаются как страницы, а в фильтрах появился жанр **Эротика** и исправлены слаги (`maho_shoujo`, `postapocalypse`, `natural`), из-за которых часть жанров давала 0 результатов. Версии: SelfManga 0.4.1, ReadManga 0.4.1, MintManga 0.5.2, AllHentai 0.4.1.
 >
 > **v0.10.7**: **MintManga 0.5.1** — найдена настоящая причина «нет результатов»: `mintmanga.one` и `*.mintmanga.com` — WordPress-сайты, которые **повторяют каталог** (`<div class="tile">`, 101 карточка), но страниц тайтлов у них нет, поэтому каталог выглядит живым, а любая манга пустая. Рабочий Grouple-ридер (каталог, тайтлы, главы, страницы) — на **`mintmanga.live`** и **`2.mintmanga.one`** (проверено: 101 карточка в каталоге, «Человек-бензопила» открывается, 379 КБ страницы тайтла). baseUrl переведён на `mintmanga.live`, в `grouple_base` добавлена замена блог-хостов (`mintmanga.one/.com/.me`, с номером и без) на `.live`; ручное переопределение baseUrl по-прежнему главнее. `24.mintmanga.one` из вашей сети не поднимает TLS (таймаут), поэтому его ставить не надо.
@@ -181,7 +183,7 @@ E2E-харнес (`_scratch/e2e_real.js`) для каждого источник
 
 | Группа | Доступные настройки |
 |---|---|
-| **Grouple** (ReadManga/MintManga/SelfManga/AllHentai) | `Override baseUrl` (если домен заблокирован) + `Session cookie` (для 18+ и DMCA-блокированных глав) || **Lib** (MangaLib/HentaiLib/AniLib/RanobeLib) | `Image server` (5 вариантов CDN) + `Auth token (Bearer)` |
+| **Grouple** (ReadManga/MintManga/SelfManga/AllHentai) | `Override baseUrl` (если домен заблокирован) + `Session cookie` (не обязателен; 18+ и так открывается, cookie может помочь только со снятыми по DMCA главами) || **Lib** (MangaLib/HentaiLib/AniLib/RanobeLib) | `Image server` (5 вариантов CDN) + `Auth token (Bearer)` |
 | **Remanga** | Bearer token для платного |
 | **Desu** | `Override baseUrl` (`desu.uno`/`desu.city`/`desu.me` редиректят) |
 | **AniLibria** | `Default quality` (480p / **720p** / 1080p) |

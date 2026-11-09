@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.4.1",
+    "version": "0.4.2",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/selfmanga.js",
@@ -24,6 +24,10 @@ class DefaultExtension extends MProvider {
     }
 
     getBaseUrl() { return groupleBaseUrlFrom(this.source); }
+
+    // Used by Mangayomi when loading covers: the Grouple image CDN rejects
+    // hotlinks, so it needs the site as Referer (see groupleImageHeaders).
+    getHeaders(url) { return groupleImageHeaders(this.getBaseUrl()); }
 
     async getPopular(page) {
         const baseUrl = this.getBaseUrl();
