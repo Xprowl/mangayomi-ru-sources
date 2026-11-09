@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.5.1",
+    "version": "0.5.2",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/mintmanga.js",
