@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.4.4",
+    "version": "0.4.5",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/selfmanga.js",
-    "notes": "Р В РЎС“РЎРѓРЎРѓР С”Р В°РЎРЏ Р В°Р Р†РЎвЂљР С•РЎР‚РЎРѓР С”Р В°РЎРЏ Р СР В°Р Р…Р С–Р В°. Mirror: 1.selfmanga.live"
+    "notes": "Р В Р’В Р РЋРЎвЂњР РЋР С“Р РЋР С“Р В РЎвЂќР В Р’В°Р РЋР РЏ Р В Р’В°Р В Р вЂ Р РЋРІР‚С™Р В РЎвЂўР РЋР вЂљР РЋР С“Р В РЎвЂќР В Р’В°Р РЋР РЏ Р В РЎВР В Р’В°Р В Р вЂ¦Р В РЎвЂ“Р В Р’В°. Mirror: 1.selfmanga.live"
 }];
 
 class DefaultExtension extends MProvider {
