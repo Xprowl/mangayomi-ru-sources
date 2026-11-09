@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.5.4",
+    "version": "0.5.5",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/mintmanga.js",
-    "notes": "0.5.4: главы читаются с рабочего зеркала 2.mintmanga.one напрямую (редирект с mintmanga.live ломал Referer, и сайт отдавал 404 с deleted1.png). Старые главы с мёртвых блогов mintmanga.one/.com/.me перенаправляются автоматически. 0.5.1+: ридер живёт на mintmanga.live, а .one/.com — WordPress-блог без тайтлов; при блокировке можно переопределить baseUrl в настройках."
+    "notes": "0.5.4: РіР»Р°РІС‹ С‡РёС‚Р°СЋС‚СЃСЏ СЃ СЂР°Р±РѕС‡РµРіРѕ Р·РµСЂРєР°Р»Р° 2.mintmanga.one РЅР°РїСЂСЏРјСѓСЋ (СЂРµРґРёСЂРµРєС‚ СЃ mintmanga.live Р»РѕРјР°Р» Referer, Рё СЃР°Р№С‚ РѕС‚РґР°РІР°Р» 404 СЃ deleted1.png). РЎС‚Р°СЂС‹Рµ РіР»Р°РІС‹ СЃ РјС‘СЂС‚РІС‹С… Р±Р»РѕРіРѕРІ mintmanga.one/.com/.me РїРµСЂРµРЅР°РїСЂР°РІР»СЏСЋС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё. 0.5.1+: СЂРёРґРµСЂ Р¶РёРІС‘С‚ РЅР° mintmanga.live, Р° .one/.com вЂ” WordPress-Р±Р»РѕРі Р±РµР· С‚Р°Р№С‚Р»РѕРІ; РїСЂРё Р±Р»РѕРєРёСЂРѕРІРєРµ РјРѕР¶РЅРѕ РїРµСЂРµРѕРїСЂРµРґРµР»РёС‚СЊ baseUrl РІ РЅР°СЃС‚СЂРѕР№РєР°С…."
 }];
 
 class DefaultExtension extends MProvider {
