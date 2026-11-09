@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.4.2",
+    "version": "0.4.3",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/selfmanga.js",
-    "notes": "Русская авторская манга. Mirror: 1.selfmanga.live"
+    "notes": "Р СѓСЃСЃРєР°СЏ Р°РІС‚РѕСЂСЃРєР°СЏ РјР°РЅРіР°. Mirror: 1.selfmanga.live"
 }];
 
 class DefaultExtension extends MProvider {

@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "0.4.2",
+    "version": "0.4.3",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/allhentai.js",
-    "notes": "18+. allhentai.ru редиректится на allhen.online — номер перед доменом (20.) регулярно меняется. При 'Failed host lookup' зайдите на https://allhentai.ru/ в браузере, посмотрите на какой mirror перебрасывает, и впишите его в настройках источника."
+    "notes": "18+. allhentai.ru СЂРµРґРёСЂРµРєС‚РёС‚СЃСЏ РЅР° allhen.online вЂ” РЅРѕРјРµСЂ РїРµСЂРµРґ РґРѕРјРµРЅРѕРј (20.) СЂРµРіСѓР»СЏСЂРЅРѕ РјРµРЅСЏРµС‚СЃСЏ. РџСЂРё 'Failed host lookup' Р·Р°Р№РґРёС‚Рµ РЅР° https://allhentai.ru/ РІ Р±СЂР°СѓР·РµСЂРµ, РїРѕСЃРјРѕС‚СЂРёС‚Рµ РЅР° РєР°РєРѕР№ mirror РїРµСЂРµР±СЂР°СЃС‹РІР°РµС‚, Рё РІРїРёС€РёС‚Рµ РµРіРѕ РІ РЅР°СЃС‚СЂРѕР№РєР°С… РёСЃС‚РѕС‡РЅРёРєР°."
 }];
 
 class DefaultExtension extends MProvider {

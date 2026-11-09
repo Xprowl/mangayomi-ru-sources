@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": false,
     "hasCloudflare": false,
-    "version": "0.4.2",
+    "version": "0.4.3",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "ru/manga/readmanga.js",
-    "notes": "Актуальный mirror: 3.readmanga.ru. Другие: web.usagi.one, readmanga.io, readmanga.live (редирект). При блокировке замените в настройках."
+    "notes": "РђРєС‚СѓР°Р»СЊРЅС‹Р№ mirror: 3.readmanga.ru. Р”СЂСѓРіРёРµ: web.usagi.one, readmanga.io, readmanga.live (СЂРµРґРёСЂРµРєС‚). РџСЂРё Р±Р»РѕРєРёСЂРѕРІРєРµ Р·Р°РјРµРЅРёС‚Рµ РІ РЅР°СЃС‚СЂРѕР№РєР°С…."
 }];
 
 class DefaultExtension extends MProvider {
