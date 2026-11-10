@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "1.0.2",
+    "version": "1.0.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "all/manga/ehentai.js",
-    "notes": "Галереи e-hentai.org, включая русские переводы: в фильтре «Язык» по умолчанию стоит Russian. Каждая галерея — тайтл с одной главой; страницы главы — все страницы галереи, подгружаются сразу целиком. Без логина, токенов и cookie. 1.0.2: картинки страниц идут через бесплатный прокси wsrv.nl — серверы H@H сбрасывают HTTP/2, и приложение не могло открыть ни одну страницу."
+    "notes": "Галереи e-hentai.org, включая русские переводы: в фильтре «Язык» по умолчанию стоит Russian. Каждая галерея — тайтл с одной главой; страницы главы — все страницы галереи, подгружаются сразу целиком. Без логина, токенов и cookie. 1.0.1: обложки в «Популярном», полный список страниц вместо одной, Referer для картинок."
 }];
 
 class DefaultExtension extends MProvider {
@@ -87,7 +87,7 @@ class DefaultExtension extends MProvider {
         }
         return {
             name: g.name || g.jpName || "E-Hentai",
-            imageUrl: ehImageProxy(g.cover),
+            imageUrl: g.cover,
             description: [g.jpName, g.tags.join(" · ")].filter(x => x).join("\n"),
             author: "",
             artist: "",
@@ -109,7 +109,7 @@ class DefaultExtension extends MProvider {
         const key = ehGalleryKey(full);
         this.pageCache = this.pageCache || {};
         const cached = this.pageCache[key];
-        if (cached) return cached.map(x => ({ url: x, headers: ehImageHeaders(x) }));
+        if (cached) return cached.map(x => ({ url: x, headers: ehHeaders() }));
 
         let total = 0;
         let first = "";
@@ -147,7 +147,7 @@ class DefaultExtension extends MProvider {
         this.pageCache[key] = urls;
         const keys = Object.keys(this.pageCache);
         if (keys.length > 12) delete this.pageCache[keys[0]];
-        return urls.map(x => ({ url: x, headers: ehImageHeaders(x) }));
+        return urls.map(x => ({ url: x, headers: ehHeaders() }));
     }
 
     // Follows the reader's own "next" links; only used when the gallery
@@ -171,13 +171,11 @@ class DefaultExtension extends MProvider {
     }
 
     // Image address of one reader page, or "" when it cannot be learnt.
-    // The address is rewritten to the image proxy: the H@H hosts reset
-    // HTTP/2, which is the only protocol the app's HTTP client uses.
     async readerImage(readerUrl) {
         try {
             const res = await this.client.get(readerUrl, ehHeaders());
             if (!res || res.statusCode !== 200) return "";
-            return ehImageProxy(ehPageImage(res.body || ""));
+            return ehPageImage(res.body || "");
         } catch (e) {
             return "";
         }
