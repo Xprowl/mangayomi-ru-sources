@@ -10,11 +10,11 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "1.0.0",
+    "version": "1.0.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "all/manga/ehentai.js",
-    "notes": "Галереи e-hentai.org, включая русские переводы: в фильтре «Язык» по умолчанию стоит Russian. Каждая галерея — тайтл с одной главой, страниц столько, сколько в галерее. Без логина, токенов и cookie."
+    "notes": "Галереи e-hentai.org, включая русские переводы: в фильтре «Язык» по умолчанию стоит Russian. Каждая галерея — тайтл с одной главой; страницы главы — все страницы галереи, подгружаются сразу целиком. Без логина, токенов и cookie. 1.0.1: обложки в «Популярном», полный список страниц вместо одной, Referer для картинок."
 }];
 
 class DefaultExtension extends MProvider {
@@ -32,7 +32,8 @@ class DefaultExtension extends MProvider {
         if (page > 1) return { list: [], hasNextPage: false };
         const res = await this.client.get(EH_BASE + "/popular", ehHeaders());
         if (res.statusCode !== 200) return { list: [], hasNextPage: false };
-        return { list: ehParsePopular(res.body), hasNextPage: false };
+        const list = ehParseList(res.body || "");
+        return { list: list.length ? list : ehParsePopular(res.body), hasNextPage: false };
     }
 
     async getLatestUpdates(page) {
@@ -42,18 +43,18 @@ class DefaultExtension extends MProvider {
     async search(query, page, filters) {
         if (ehPopularSort(filters)) return await this.getPopular(page);
         const q = query && /language:/.test(query) ? String(query).trim() : ehQuery(query, filters);
-        return await this.fetchList(q, page);
+        return await this.fetchList(q, page, ehCategoryMask(filters));
     }
 
-    async fetchList(q, page) {
+    async fetchList(q, page, cats) {
         // The site keeps its place in a result set in a "next" token: every
         // listing page answers with the token for the following one. Asking
         // the search again with only ?page=N repeats page 1.
         this.tokens = this.tokens || {};
-        const key = q || "(all)";
+        const key = (q || "(all)") + "|" + (cats || "");
         const next = page <= 1 ? 0 : this.tokens[key];
         if (next === undefined) return { list: [], hasNextPage: false };
-        const res = await this.client.get(ehListUrl(q, next), ehHeaders());
+        const res = await this.client.get(ehListUrl(q, next, cats), ehHeaders());
         if (res.statusCode !== 200) return { list: [], hasNextPage: false };
         const body = res.body || "";
         if (/No hits found/i.test(body)) return { list: [], hasNextPage: false };
@@ -98,72 +99,85 @@ class DefaultExtension extends MProvider {
 
     // Pages of the gallery, in order.
     //
-    // Each reader page answers with the real image address, and asking for it
-    // costs one request on the site. So the addresses are learnt in the
-    // background, in the same order the reader goes, while the pages are
-    // handed over as reader URLs right away (the app opens those with these
-    // headers, so every page still shows). Once an address is known, the next
-    // call returns it directly.
+    // The app asks for the page list once and keeps it, so every page has to be
+    // returned here. The gallery's own ?p= listings hand out the reader URLs in
+    // batches of 20 (a couple of requests), and each reader page is then read
+    // for its image address with a few requests in flight. Both results are
+    // cached for the session, so reopening a gallery is instant.
     async getPageList(url) {
         const full = url.indexOf("http") === 0 ? url : this.getBaseUrl() + url;
         const key = ehGalleryKey(full);
-        let gallery = this.galleries && this.galleries[key];
-        if (!gallery) {
+        this.pageCache = this.pageCache || {};
+        const cached = this.pageCache[key];
+        if (cached) return cached.map(x => ({ url: x, headers: ehHeaders() }));
+
+        let total = 0;
+        let first = "";
+        try {
             const res = await this.client.get(full, ehHeaders());
             const g = ehGallery(res.body || "");
-            gallery = { total: g.pages, pages: [], next: g.firstPage, known: 0, images: {}, walking: false };
-            this.galleries = this.galleries || {};
-            this.galleries[key] = gallery;
+            total = g.pages;
+            first = g.firstPage;
+        } catch (e) {}
+
+        // All reader URLs from the gallery's batch listings.
+        let readers = [];
+        if (total > 0) {
+            const listings = Math.ceil(total / 20);
+            for (let p = 0; p < listings; p++) {
+                try {
+                    const res = await this.client.get(ehGalleryListingUrl(full, p), ehHeaders());
+                    if (res && res.statusCode === 200) readers = readers.concat(ehReaderPages(res.body || ""));
+                } catch (e) {}
+            }
+            readers = ehUniqueUrls(readers).sort((a, b) => ehPageNumber(a) - ehPageNumber(b));
         }
-        // The app preloads the next pages right after this call, so the image
-        // address of the first page is learnt here; the rest follows in the
-        // background (walk).
-        if (gallery.next && !gallery.pages.length) {
-            await this.step(gallery);
+
+        // Fallback when the batch listing gives nothing: follow the page chain.
+        if (!readers.length && first) {
+            readers = await this.chainPages(first, total || EH_MAX_PAGES);
         }
-        this.walk(gallery);
+
+        // Image address of every page, a few requests in flight.
+        const urls = await ehMapLimit(readers, EH_CONCURRENCY, async (readerUrl) => {
+            const img = await this.readerImage(readerUrl);
+            return img || readerUrl;
+        });
+
+        this.pageCache[key] = urls;
+        const keys = Object.keys(this.pageCache);
+        if (keys.length > 12) delete this.pageCache[keys[0]];
+        return urls.map(x => ({ url: x, headers: ehHeaders() }));
+    }
+
+    // Follows the reader's own "next" links; only used when the gallery
+    // listings cannot be read.
+    async chainPages(first, total) {
         const out = [];
-        for (const readerUrl of gallery.pages) {
-            out.push({ url: gallery.images[readerUrl] || readerUrl, headers: ehHeaders() });
+        let cur = first.indexOf("http") === 0 ? first : EH_BASE + first;
+        while (cur && out.length < Math.min(total || EH_MAX_PAGES, EH_MAX_PAGES)) {
+            out.push(cur);
+            let next = "";
+            try {
+                const res = await this.client.get(cur, ehHeaders());
+                if (!res || res.statusCode !== 200) break;
+                next = ehPageNext(res.body || "");
+            } catch (e) {
+                break;
+            }
+            cur = next;
         }
         return out;
     }
 
-    async step(gallery) {
-        if (!gallery.next) return false;
-        const res = await this.client.get(gallery.next, ehHeaders());
-        if (!res || res.statusCode !== 200) { gallery.next = ""; return false; }
-        const body = res.body || "";
-        const img = ehPageImage(body);
-        gallery.pages.push(gallery.next);
-        if (img) gallery.images[gallery.next] = img;
-        const next = ehPageNext(body);
-        gallery.next = next || "";
-        return true;
-    }
-
-    // Learns reader pages in order, a few at a time, without holding up the
-    // page list. Stops at the gallery's last page; a later call resumes if the
-    // previous walk was cut short by a network error.
-    walk(gallery) {
-        if (gallery.walking) return;
-        gallery.walking = true;
-        const step = () => {
-            if (!gallery.next || !gallery.pages.length && gallery.total === 0) { gallery.walking = false; return; }
-            if (gallery.total && gallery.pages.length >= gallery.total) { gallery.walking = false; return; }
-            const url = gallery.next;
-            this.client.get(url, ehHeaders()).then(res => {
-                if (!res || res.statusCode !== 200) { gallery.walking = false; return; }
-                const body = res.body || "";
-                const img = ehPageImage(body);
-                gallery.pages.push(url);
-                if (img) gallery.images[url] = img;
-                const next = ehPageNext(body);
-                gallery.next = next || "";
-                if (!next) gallery.walking = false;
-                else step();
-            }).catch(() => { gallery.walking = false; });
-        };
-        step();
+    // Image address of one reader page, or "" when it cannot be learnt.
+    async readerImage(readerUrl) {
+        try {
+            const res = await this.client.get(readerUrl, ehHeaders());
+            if (!res || res.statusCode !== 200) return "";
+            return ehPageImage(res.body || "");
+        } catch (e) {
+            return "";
+        }
     }
 }
