@@ -10,7 +10,7 @@ const mangayomiSources = [{
     "itemType": 0,
     "isNsfw": true,
     "hasCloudflare": false,
-    "version": "1.0.0",
+    "version": "1.0.1",
     "dateFormat": "",
     "dateFormatLocale": "",
     "pkgPath": "all/manga/nhentai.js",
@@ -78,28 +78,32 @@ class DefaultExtension extends MProvider {
         return { list: list, hasNextPage: nhHasNext(body) };
     }
 
-    // Popular Now from the home page. That block is only a teaser of a few
-    // cards, so when it is shorter than a page the site's popular search
-    // fills the rest.
+    // Popular: the site's popular search, page after page. On the first page
+    // the home page's "Popular Now" cards go on top (they are a teaser of just
+    // a few galleries), so the first screen has a full page of cards.
     async getPopular(page) {
         const p = Math.max(1, Number(page) || 1);
-        let list = [];
+        const res = await this.nhList("/search/?key=&sort=popular", p);
+        const list = res.list.slice();
         if (p === 1) {
-            const res = await this.client.get(NH_BASE + "/", nhHeaders());
-            const body = res && res.statusCode === 200 ? res.body || "" : "";
+            const seen = {};
+            for (const x of list) seen[x.link] = true;
+            const home = await this.client.get(NH_BASE + "/", nhHeaders());
+            const body = home && home.statusCode === 200 ? home.body || "" : "";
             const start = body.indexOf("Popular Now");
             if (start >= 0) {
                 const end = body.indexOf("New Uploads", start);
                 let section = end > start ? body.slice(start, end) : body.slice(start);
                 const first = section.search(/class="gallery_item"/);
                 section = section.slice(first >= 0 ? first : 0).replace(/<script[\s\S]*?<\/script>/g, "");
-                list = nhParseList(section).map(x => ({ name: x.name, imageUrl: x.imageUrl, link: x.link }));
+                for (const x of nhParseList(section)) {
+                    if (seen[x.link]) continue;
+                    seen[x.link] = true;
+                    list.unshift({ name: x.name, imageUrl: x.imageUrl, link: x.link });
+                }
             }
         }
-        if (list.length && list.length < NH_PER_PAGE) return { list: list, hasNextPage: false };
-        const more = await this.nhList("/search/?key=&sort=popular", p);
-        if (list.length) return { list: list, hasNextPage: false };
-        return more;
+        return { list: list, hasNextPage: res.hasNextPage };
     }
 
     async getLatestUpdates(page) {
